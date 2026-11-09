@@ -29,32 +29,9 @@ jobs:
       - name: TigerStyle Static Analysis Linter
         run: zig run tools/lint.zig
 
-  cross-compile-matrix:
-    name: Cross-Compilation (${{ matrix.target }})
+  cross-compile-tiers:
+    name: Consolidated Tier Cross-Compilation & Isolation Fences
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          # Tier 1 Desktop
-          - aarch64-macos
-          - x86_64-macos
-          - x86_64-linux-gnu
-          - x86_64-linux-musl
-          - aarch64-linux-gnu
-          - aarch64-linux-musl
-          # Tier 2 Windows
-          - x86_64-windows-gnu
-          # Tier 3 Mobile
-          - aarch64-linux-android
-          - aarch64-ios
-          - aarch64-ios-simulator
-          # Tier 4 BSD
-          - x86_64-freebsd
-          - aarch64-freebsd
-          # Tier 5 Web
-          - wasm32-freestanding
-          - wasm32-wasi
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -64,30 +41,41 @@ jobs:
         with:
           version: 0.17.1
 
-      - name: Cross-Compile Spike
+      - name: Tier 1 Desktop Cross-Compilation Check
         run: |
-          zig build-obj spikes/resize_1cycle.zig -target ${{ matrix.target }} -O ReleaseSmall
+          for target in aarch64-macos x86_64-macos x86_64-linux-gnu x86_64-linux-musl aarch64-linux-gnu aarch64-linux-musl; do
+            echo "Cross-compiling spike for ${target}..."
+            zig build-obj spikes/resize_1cycle.zig -target ${target} -O ReleaseSmall
+          done
 
-  non-posix-fence:
-    name: Non-POSIX Isolation Fence (Wasm & Windows)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Tier 2 Windows Cross-Compilation & Freestanding Fence
+        run: |
+          echo "Cross-compiling spike for x86_64-windows-gnu..."
+          zig build-obj spikes/resize_1cycle.zig -target x86_64-windows-gnu -O ReleaseSmall
+          zig test src/root.zig -target x86_64-windows-gnu --test-no-exec
 
-      - name: Setup Zig 0.17.1
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.1
+      - name: Tier 3 Mobile Cross-Compilation Check
+        run: |
+          for target in aarch64-linux-android aarch64-ios aarch64-ios-simulator; do
+            echo "Cross-compiling spike for ${target}..."
+            zig build-obj spikes/resize_1cycle.zig -target ${target} -O ReleaseSmall
+          done
 
-      - name: Freestanding Wasm Compile Check
-        run: zig build-obj spikes/resize_1cycle.zig -target wasm32-freestanding -O ReleaseSmall
+      - name: Tier 4 BSD Cross-Compilation Check
+        run: |
+          for target in x86_64-freebsd aarch64-freebsd; do
+            echo "Cross-compiling spike for ${target}..."
+            zig build-obj spikes/resize_1cycle.zig -target ${target} -O ReleaseSmall
+          done
 
-      - name: Win32 Freestanding Compile Check
-        run: zig build-obj spikes/resize_1cycle.zig -target x86_64-windows-gnu -O ReleaseSmall
-
-      - name: Root Module Freestanding Check
-        run: zig build-obj src/root.zig -target wasm32-freestanding -O ReleaseSmall
+      - name: Tier 5 Web & Freestanding Isolation Fence
+        run: |
+          for target in wasm32-freestanding wasm32-wasi; do
+            echo "Cross-compiling spike for ${target}..."
+            zig build-obj spikes/resize_1cycle.zig -target ${target} -O ReleaseSmall
+          done
+          echo "Validating root module under wasm32-freestanding..."
+          zig build-obj src/root.zig -target wasm32-freestanding -O ReleaseSmall
 
   size-budget:
     name: Binary Size Budget Verification
@@ -133,6 +121,9 @@ jobs:
         with:
           version: 0.17.1
 
+      - name: Install System Fonts for TrueType Benchmark
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+
       - name: Run Test Suites & Oracles
         run: zig build test -Doptimize=ReleaseFast
 
@@ -169,25 +160,37 @@ jobs:
       - name: Run Native Flagship Benchmarks (ReleaseFast)
         run: zig build bench -Doptimize=ReleaseFast
 
-      - name: Rosetta 2 Emulated Cross-Execution
+      - name: Rosetta 2 Emulated Cross-Execution (Tests & Flagship Benchmarks)
         run: |
-          zig test spikes/paint_pipeline.zig -target x86_64-macos -O ReleaseFast --test-no-exec -femit-bin=paint_pipeline_x86
-          arch -x86_64 ./paint_pipeline_x86
+          zig test spikes/paint_pipeline.zig -target x86_64-macos -O ReleaseFast --test-no-exec -femit-bin=paint_x86
+          arch -x86_64 ./paint_x86
           zig build-exe spikes/resize_1cycle.zig -target x86_64-macos -O ReleaseFast -femit-bin=resize_x86
           arch -x86_64 ./resize_x86
-          rm ./paint_pipeline_x86 ./resize_x86
+          zig build-exe spikes/perf_100x_prototype.zig -target x86_64-macos -O ReleaseFast -femit-bin=perf_x86
+          arch -x86_64 ./perf_x86
+          zig build-exe spikes/alt_architectures_bench.zig -target x86_64-macos -O ReleaseFast -femit-bin=alt_x86
+          arch -x86_64 ./alt_x86
+          zig build-exe spikes/truetype_real.zig -target x86_64-macos -O ReleaseFast -femit-bin=truetype_x86
+          arch -x86_64 ./truetype_x86
+          rm ./paint_x86 ./resize_x86 ./perf_x86 ./alt_x86 ./truetype_x86
 
-      - name: iOS Simulator Cross-Execution (xcrun simctl)
+      - name: iOS Simulator Cross-Execution (Tests & Flagship Benchmarks via xcrun simctl)
         run: |
-          zig build-exe spikes/resize_1cycle.zig -target aarch64-ios-simulator -O ReleaseFast -femit-bin=resize_ios_sim
           zig test spikes/paint_pipeline.zig -target aarch64-ios-simulator -O ReleaseFast --test-no-exec -femit-bin=paint_ios_sim
-          DEVICE_NAME=$(xcrun simctl list devices available | grep -E "iPhone [0-9]+" | head -n 1 | sed -E 's/.*(iPhone [^()]+).*/\1/' | xargs)
-          echo "Booting iOS Simulator device: '${DEVICE_NAME}'"
-          xcrun simctl boot "${DEVICE_NAME}"
-          xcrun simctl spawn booted ./paint_ios_sim
-          xcrun simctl spawn booted ./resize_ios_sim
-          xcrun simctl shutdown "${DEVICE_NAME}"
-          rm ./resize_ios_sim ./paint_ios_sim
+          zig build-exe spikes/resize_1cycle.zig -target aarch64-ios-simulator -O ReleaseFast -femit-bin=resize_ios_sim
+          zig build-exe spikes/perf_100x_prototype.zig -target aarch64-ios-simulator -O ReleaseFast -femit-bin=perf_ios_sim
+          zig build-exe spikes/alt_architectures_bench.zig -target aarch64-ios-simulator -O ReleaseFast -femit-bin=alt_ios_sim
+          zig build-exe spikes/truetype_real.zig -target aarch64-ios-simulator -O ReleaseFast -femit-bin=truetype_ios_sim
+          DEVICE_UUID=$(xcrun simctl list devices available | grep -E "iPhone" | head -n 1 | grep -oE '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}')
+          echo "Booting iOS Simulator UUID: ${DEVICE_UUID}"
+          xcrun simctl boot "${DEVICE_UUID}" || true
+          xcrun simctl spawn "${DEVICE_UUID}" ./paint_ios_sim
+          xcrun simctl spawn "${DEVICE_UUID}" ./resize_ios_sim
+          xcrun simctl spawn "${DEVICE_UUID}" ./perf_ios_sim
+          xcrun simctl spawn "${DEVICE_UUID}" ./alt_ios_sim
+          xcrun simctl spawn "${DEVICE_UUID}" ./truetype_ios_sim
+          xcrun simctl shutdown "${DEVICE_UUID}" || true
+          rm ./paint_ios_sim ./resize_ios_sim ./perf_ios_sim ./alt_ios_sim ./truetype_ios_sim
 
   test-and-bench-windows:
     name: Test & Bench (Windows x86_64 Native)
@@ -230,17 +233,25 @@ jobs:
           curl https://wasmtime.dev/install.sh -sSf | bash
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
 
-      - name: Compile WASI Test & Benchmark Binaries
+      - name: Compile WASI Test & Flagship Benchmark Binaries
         run: |
-          zig build-exe spikes/resize_1cycle.zig -target wasm32-wasi -O ReleaseFast -femit-bin=resize_1cycle.wasm
-          zig test spikes/resize_1cycle.zig -target wasm32-wasi -O ReleaseFast --test-no-exec -femit-bin=test_resize.wasm
+          zig test src/root.zig -target wasm32-wasi -O ReleaseFast --test-no-exec -femit-bin=test_root.wasm
           zig test spikes/paint_pipeline.zig -target wasm32-wasi -O ReleaseFast --test-no-exec -femit-bin=test_paint.wasm
+          zig test spikes/resize_1cycle.zig -target wasm32-wasi -O ReleaseFast --test-no-exec -femit-bin=test_resize.wasm
+          zig build-exe spikes/resize_1cycle.zig -target wasm32-wasi -O ReleaseFast -femit-bin=resize_1cycle.wasm
+          zig build-exe spikes/perf_100x_prototype.zig -target wasm32-wasi -O ReleaseFast -femit-bin=perf_100x.wasm
+          zig build-exe spikes/alt_architectures_bench.zig -target wasm32-wasi -O ReleaseFast -femit-bin=alt_bench.wasm
+          zig build-exe spikes/truetype_real.zig -target wasm32-wasi -O ReleaseFast -femit-bin=truetype_real.wasm
 
-      - name: Execute WASI Tests & Benchmarks via Wasmtime
+      - name: Execute WASI Tests & Flagship Benchmarks via Wasmtime
         run: |
+          wasmtime test_root.wasm
           wasmtime test_paint.wasm
           wasmtime test_resize.wasm
           wasmtime resize_1cycle.wasm
+          wasmtime perf_100x.wasm
+          wasmtime alt_bench.wasm
+          wasmtime truetype_real.wasm
 
   test-and-bench-android:
     name: Test & Bench (Android ARM64 via QEMU)
@@ -257,14 +268,15 @@ jobs:
       - name: Install QEMU User Static
         run: sudo apt-get update && sudo apt-get install -y qemu-user-static
 
-      - name: Cross-Compile Android ARM64 Binaries
+      - name: Cross-Compile Android ARM64 Test & Flagship Benchmark Binaries
         run: |
-          zig build-exe spikes/resize_1cycle.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=resize_android
-          zig build-exe spikes/alt_architectures_bench.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=alt_android
-          zig build-exe spikes/perf_100x_prototype.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=perf_android
-          zig build-exe spikes/engine_m0.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=engine_android
           zig test spikes/paint_pipeline.zig -target aarch64-linux-android -O ReleaseFast --test-no-exec -femit-bin=test_paint_android
           zig test spikes/resize_1cycle.zig -target aarch64-linux-android -O ReleaseFast --test-no-exec -femit-bin=test_resize_android
+          zig build-exe spikes/engine_m0.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=engine_android
+          zig build-exe spikes/resize_1cycle.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=resize_android
+          zig build-exe spikes/perf_100x_prototype.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=perf_android
+          zig build-exe spikes/alt_architectures_bench.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=alt_android
+          zig build-exe spikes/truetype_real.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=truetype_android
 
       - name: Execute Android ARM64 via QEMU User Space
         run: |
@@ -272,8 +284,9 @@ jobs:
           qemu-aarch64-static ./test_resize_android
           qemu-aarch64-static ./engine_android
           qemu-aarch64-static ./resize_android
-          qemu-aarch64-static ./alt_android
           qemu-aarch64-static ./perf_android
+          qemu-aarch64-static ./alt_android
+          qemu-aarch64-static ./truetype_android
 
   test-and-bench-freebsd:
     name: Test & Bench (FreeBSD 14 VM via vmactions)
@@ -287,34 +300,37 @@ jobs:
         with:
           version: 0.17.1
 
-      - name: Cross-Compile FreeBSD x86_64 Binaries
+      - name: Cross-Compile FreeBSD x86_64 Test & Flagship Benchmark Binaries
         run: |
-          zig build-exe spikes/resize_1cycle.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=resize_fbsd
-          zig build-exe spikes/alt_architectures_bench.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=alt_fbsd
-          zig build-exe spikes/perf_100x_prototype.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=perf_fbsd
           zig test spikes/paint_pipeline.zig -target x86_64-freebsd -O ReleaseFast --test-no-exec -femit-bin=test_paint_fbsd
           zig test spikes/resize_1cycle.zig -target x86_64-freebsd -O ReleaseFast --test-no-exec -femit-bin=test_resize_fbsd
+          zig build-exe spikes/engine_m0.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=engine_fbsd
+          zig build-exe spikes/resize_1cycle.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=resize_fbsd
+          zig build-exe spikes/perf_100x_prototype.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=perf_fbsd
+          zig build-exe spikes/alt_architectures_bench.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=alt_fbsd
+          zig build-exe spikes/truetype_real.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=truetype_fbsd
 
-      - name: Run Tests & Benchmarks in FreeBSD VM
+      - name: Run Tests & Flagship Benchmarks in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
           sync: rsync
           run: |
-            chmod +x test_paint_fbsd test_resize_fbsd resize_fbsd alt_fbsd perf_fbsd
+            chmod +x test_paint_fbsd test_resize_fbsd engine_fbsd resize_fbsd perf_fbsd alt_fbsd truetype_fbsd
             ./test_paint_fbsd
             ./test_resize_fbsd
+            ./engine_fbsd
             ./resize_fbsd
-            ./alt_fbsd
             ./perf_fbsd
+            ./alt_fbsd
+            ./truetype_fbsd
 
   required:
     name: Required Status Gate
     if: always()
     needs:
       - lint-and-format
-      - cross-compile-matrix
-      - non-posix-fence
+      - cross-compile-tiers
       - size-budget
       - test-and-bench-linux
       - test-and-bench-macos-ios

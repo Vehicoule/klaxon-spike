@@ -114,11 +114,11 @@ inline fn quadArc(p0: [2]f32, p1: [2]f32, p2: [2]f32) BezierQuadratic {
     return .{ .p0 = p0, .p1 = p1, .p2 = p2 };
 }
 
-const is_windows = (builtin.os.tag == .windows);
-const is_wasi = (builtin.os.tag == .wasi);
-const is_posix = (builtin.os.tag != .windows and
-    builtin.os.tag != .freestanding and
-    builtin.os.tag != .wasi);
+const is_windows = (builtin.target.os.tag == .windows);
+const is_wasi = (builtin.target.os.tag == .wasi);
+const is_posix = (builtin.target.os.tag != .windows and
+    builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
 
 const GENERIC_READ: u32 = 0x80000000;
 const FILE_SHARE_READ: u32 = 0x00000001;

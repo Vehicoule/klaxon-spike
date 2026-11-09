@@ -14,10 +14,10 @@ zig build lint
 zig run tools/lint.zig
 
 # Check code formatting (always run before committing)
-zig fmt --check spikes/*.zig tools/*.zig build.zig
+zig fmt --check spikes/*.zig tools/*.zig build.zig src/*.zig src/*/*.zig
 
 # Format all Zig files
-zig fmt spikes/*.zig tools/*.zig build.zig
+zig fmt spikes/*.zig tools/*.zig build.zig src/*.zig src/*/*.zig
 
 # Run all test suites
 zig build test -Doptimize=ReleaseFast

@@ -50,11 +50,11 @@ const assert = std.debug.assert;
 // Portabilité Cross-Platform : Header Multi-OS & Zéro Dépendance Threaded IO
 // ============================================================================
 
-const is_windows = (builtin.os.tag == .windows);
-const is_wasi = (builtin.os.tag == .wasi);
-const is_posix = (builtin.os.tag != .windows and
-    builtin.os.tag != .freestanding and
-    builtin.os.tag != .wasi);
+const is_windows = (builtin.target.os.tag == .windows);
+const is_wasi = (builtin.target.os.tag == .wasi);
+const is_posix = (builtin.target.os.tag != .windows and
+    builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
 
 // Déclarations Win32 explicites sans runtime global
 const STD_OUTPUT_HANDLE: i32 = -11;
@@ -91,7 +91,7 @@ fn minimalPanic(message: []const u8, _: ?usize) noreturn {
     @trap();
 }
 pub const panic = std.debug.FullPanic(minimalPanic);
-pub const std_options_debug_threaded_io: ?*std.Io.Threaded = if (builtin.os.tag == .macos)
+pub const std_options_debug_threaded_io: ?*std.Io.Threaded = if (builtin.target.os.tag == .macos)
     null
 else
     std.Io.Threaded.global_single_threaded;
@@ -176,8 +176,8 @@ pub fn main() void {
     verifyCorrectnessAgainstBaseline();
 
     printFmt("Cible Active     : OS={s}, Arch={s}, SIMD i16={d} entiers ({d} natifs), SIMD f32={d} floats ({d} natifs)\n", .{
-        @tagName(builtin.os.tag),
-        @tagName(builtin.cpu.arch),
+        @tagName(builtin.target.os.tag),
+        @tagName(builtin.target.cpu.arch),
         vec_len_i16,
         native_simd_len_i16,
         vec_len_f32,

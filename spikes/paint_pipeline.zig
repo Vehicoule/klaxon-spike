@@ -30,9 +30,10 @@ const shader = @import("unified_shader.zig");
 // Portabilité Cross-Platform : Header Multi-OS & Zéro Dépendance Libc
 // ============================================================================
 
-const is_windows = (builtin.os.tag == .windows);
-const is_posix = (builtin.os.tag != .windows and builtin.os.tag != .freestanding and
-    builtin.os.tag != .wasi);
+const is_windows = (builtin.target.os.tag == .windows);
+const is_wasi = (builtin.target.os.tag == .wasi);
+const is_posix = (builtin.target.os.tag != .windows and builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
 
 const STD_OUTPUT_HANDLE: i32 = -11;
 
@@ -52,6 +53,10 @@ fn printStr(str: []const u8) void {
         const handle = GetStdHandle(STD_OUTPUT_HANDLE);
         var written: u32 = 0;
         _ = WriteFile(handle, str.ptr, @intCast(str.len), &written, null);
+    } else if (is_wasi) {
+        const iov = [_]std.posix.iovec_const{.{ .base = str.ptr, .len = str.len }};
+        var written: usize = 0;
+        _ = std.os.wasi.fd_write(1, &iov, 1, &written);
     } else if (is_posix) {
         _ = std.posix.system.write(1, str.ptr, str.len);
     }
@@ -71,6 +76,10 @@ fn readTimestampNs() u64 {
         _ = QueryPerformanceFrequency(&freq);
         if (freq == 0) return 0;
         return @intCast(@divFloor(@as(i128, count) * 1_000_000_000, freq));
+    } else if (is_wasi) {
+        var ts: std.os.wasi.timestamp_t = 0;
+        _ = std.os.wasi.clock_time_get(.MONOTONIC, 1, &ts);
+        return ts;
     } else if (is_posix) {
         var ts: std.posix.timespec = undefined;
         _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);

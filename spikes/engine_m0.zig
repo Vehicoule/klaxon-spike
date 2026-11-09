@@ -14,11 +14,11 @@ const shader = @import("unified_shader.zig");
 
 const builtin = @import("builtin");
 
-const is_windows = (builtin.os.tag == .windows);
-const is_wasi = (builtin.os.tag == .wasi);
-const is_posix = (builtin.os.tag != .windows and
-    builtin.os.tag != .freestanding and
-    builtin.os.tag != .wasi);
+const is_windows = (builtin.target.os.tag == .windows);
+const is_wasi = (builtin.target.os.tag == .wasi);
+const is_posix = (builtin.target.os.tag != .windows and
+    builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
 
 const STD_OUTPUT_HANDLE: i32 = -11;
 const STD_ERROR_HANDLE: i32 = -12;

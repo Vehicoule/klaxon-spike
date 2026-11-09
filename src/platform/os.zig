@@ -88,6 +88,7 @@ extern "kernel32" fn CreateFileW(
 ) callconv(.winapi) ?*anyopaque;
 
 extern "kernel32" fn CloseHandle(hObject: ?*anyopaque) callconv(.winapi) i32;
+extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) i32;
 extern "kernel32" fn GetFileSizeEx(hFile: ?*anyopaque, lpFileSize: *i64) callconv(.winapi) i32;
 extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) callconv(.winapi) i32;
 extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) callconv(.winapi) i32;
@@ -427,6 +428,23 @@ pub fn closeFile(handle: FileHandle) void {
     }
 }
 
+/// Deletes a file from the filesystem.
+pub fn deleteFile(path: []const u8) void {
+    if (is_windows) {
+        if (path.len >= 1024) return;
+        var utf16_buf: [1025]u16 = undefined;
+        const len = std.unicode.utf8ToUtf16Le(&utf16_buf, path) catch return;
+        utf16_buf[len] = 0;
+        _ = DeleteFileW(utf16_buf[0..len :0]);
+    } else if (is_posix) {
+        var path_z: [1024]u8 = undefined;
+        if (path.len >= 1024) return;
+        @memcpy(path_z[0..path.len], path);
+        path_z[path.len] = 0;
+        _ = std.posix.system.unlink(path_z[0..path.len :0]);
+    }
+}
+
 /// Retrieves the exact file size in bytes.
 pub fn getFileSize(handle: FileHandle) FileError!u64 {
     assert(handle.isValid());
@@ -542,9 +560,7 @@ test "File I/O operations round-trip in /tmp" {
 
     var path_buf: [128]u8 = undefined;
     const test_path = try makeTestPath(&path_buf, "klaxon_io_roundtrip");
-    defer if (is_posix) {
-        _ = std.posix.system.unlink(test_path);
-    };
+    defer deleteFile(test_path);
     const payload = "Klaxon TigerStyle Zero-Libc I/O Pipeline\n";
 
     // Write file
@@ -576,9 +592,7 @@ test "File I/O empty file handling" {
 
     var path_buf: [128]u8 = undefined;
     const empty_path = try makeTestPath(&path_buf, "klaxon_io_empty");
-    defer if (is_posix) {
-        _ = std.posix.system.unlink(empty_path);
-    };
+    defer deleteFile(empty_path);
 
     const handle = try openFile(empty_path, .create_truncate);
     closeFile(handle);
@@ -593,9 +607,7 @@ test "File I/O write_only preserves remaining bytes" {
 
     var path_buf: [128]u8 = undefined;
     const test_path = try makeTestPath(&path_buf, "klaxon_io_write_only");
-    defer if (is_posix) {
-        _ = std.posix.system.unlink(test_path);
-    };
+    defer deleteFile(test_path);
 
     // Create file with initial content
     const init_handle = try openFile(test_path, .create_truncate);
