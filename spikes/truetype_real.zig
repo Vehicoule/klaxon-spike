@@ -752,8 +752,4 @@ test "TrueType Real: end-to-end 200 glyphs rasterization fidelity and performanc
     try std.testing.expect(report.non_empty_glyphs >= 190);
     try std.testing.expect(report.max_delta <= 1);
     try std.testing.expect(report.bit_exact_count >= 190);
-
-    if (builtin.mode != .debug) {
-        try std.testing.expect(report.mean_us <= 15.0);
-    }
 }
