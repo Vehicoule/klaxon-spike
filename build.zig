@@ -34,6 +34,9 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all unit tests and fuzzer spikes");
 
     const tests = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "root", .path = "src/root.zig" },
+        .{ .name = "platform-os", .path = "src/platform/os.zig" },
+        .{ .name = "platform-time", .path = "src/platform/time.zig" },
         .{ .name = "lint-tests", .path = "tools/lint.zig" },
         .{ .name = "fuzz-newton", .path = "spikes/test_fuzz_newton.zig" },
         .{ .name = "autopsy-glyph", .path = "spikes/autopsy_glyph_delta1.zig" },
