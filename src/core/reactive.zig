@@ -263,8 +263,10 @@ pub const ReactiveDispatcher = struct {
         handler: anytype,
     ) usize {
         var mutations_processed: usize = 0;
+        const iteration_limit_max: usize = 64;
+        var iteration: usize = 0;
 
-        while (!self.dirty.isZero()) {
+        while (!self.dirty.isZero() and iteration < iteration_limit_max) : (iteration += 1) {
             const field = self.dirty.popLowest();
             const edges = graph.getEdges(field);
 

@@ -398,7 +398,9 @@ pub fn writeFile(handle: FileHandle, src: []const u8) FileError!usize {
             else => @as(usize, std.math.maxInt(i32)),
         };
         const to_write = @min(src.len, max_chunk);
-        while (true) {
+        const retry_limit_max: usize = 1000;
+        var retry_count: usize = 0;
+        while (retry_count < retry_limit_max) : (retry_count += 1) {
             const rc = std.posix.system.write(handle.handle, src.ptr, to_write);
             switch (std.posix.errno(rc)) {
                 .SUCCESS => return @intCast(rc),
@@ -408,6 +410,7 @@ pub fn writeFile(handle: FileHandle, src: []const u8) FileError!usize {
                 else => return FileError.Unexpected,
             }
         }
+        return FileError.Unexpected;
     } else {
         return FileError.Unsupported;
     }
@@ -417,8 +420,9 @@ pub fn writeFile(handle: FileHandle, src: []const u8) FileError!usize {
 pub fn closeFile(handle: FileHandle) void {
     if (!handle.isValid()) return;
     if (is_windows) {
-        const ok = CloseHandle(handle.handle);
-        _ = ok;
+        if (CloseHandle(handle.handle) == 0) {
+            // Best-effort handle close.
+        }
     } else if (is_posix) {
         const rc = std.posix.system.close(handle.handle);
         switch (std.posix.errno(rc)) {
@@ -435,13 +439,19 @@ pub fn deleteFile(path: []const u8) void {
         var utf16_buf: [1025]u16 = undefined;
         const len = std.unicode.utf8ToUtf16Le(&utf16_buf, path) catch return;
         utf16_buf[len] = 0;
-        _ = DeleteFileW(utf16_buf[0..len :0]);
+        if (DeleteFileW(utf16_buf[0..len :0]) == 0) {
+            // Best-effort deletion for cleanup; ignore error.
+        }
     } else if (is_posix) {
         var path_z: [1024]u8 = undefined;
         if (path.len >= 1024) return;
         @memcpy(path_z[0..path.len], path);
         path_z[path.len] = 0;
-        _ = std.posix.system.unlink(path_z[0..path.len :0]);
+        const rc = std.posix.system.unlink(path_z[0..path.len :0]);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS, .NOENT => {},
+            else => {},
+        }
     }
 }
 
@@ -611,12 +621,14 @@ test "File I/O write_only preserves remaining bytes" {
 
     // Create file with initial content
     const init_handle = try openFile(test_path, .create_truncate);
-    _ = try writeFile(init_handle, "ABCDEFGHIJ");
+    const written_init = try writeFile(init_handle, "ABCDEFGHIJ");
+    try std.testing.expectEqual(@as(usize, 10), written_init);
     closeFile(init_handle);
 
     // Reopen write_only and overwrite only first 3 bytes
     const wo_handle = try openFile(test_path, .write_only);
-    _ = try writeFile(wo_handle, "123");
+    const written_patch = try writeFile(wo_handle, "123");
+    try std.testing.expectEqual(@as(usize, 3), written_patch);
     closeFile(wo_handle);
 
     // Verify remaining bytes are intact

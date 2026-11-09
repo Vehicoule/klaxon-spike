@@ -213,7 +213,9 @@ pub fn Engine(
             var dirty_bits = reactive.Bitmask64.empty();
             reactive.diffState(State, &self.prev_state, &self.state, &dirty_bits);
 
-            while (!dirty_bits.isZero()) {
+            const iteration_limit_max: usize = 64;
+            var iteration: usize = 0;
+            while (!dirty_bits.isZero() and iteration < iteration_limit_max) : (iteration += 1) {
                 const bit = dirty_bits.popLowest();
                 self.dispatcher.markField(bit);
             }
@@ -264,10 +266,18 @@ pub fn Engine(
 
             const t0 = time.now();
 
-            self.viewport_width_px = new_width_px;
-            self.viewport_height_px = new_height_px;
+            const clamped_w = std.math.clamp(new_width_px, 1.0, 32767.0);
+            const clamped_h = std.math.clamp(new_height_px, 1.0, 32767.0);
 
-            const w_i16: i16 = @intFromFloat(new_width_px);
+            const height_changed = (clamped_h != self.viewport_height_px);
+            self.viewport_width_px = clamped_w;
+            self.viewport_height_px = clamped_h;
+
+            if (height_changed) {
+                self.tree.run4Pass(self.viewport_width_px, self.viewport_height_px);
+            }
+
+            const w_i16: i16 = @intFromFloat(clamped_w);
             self.tree.solveResizeSimd(w_i16);
             self.layout_dirty = false;
 
@@ -276,8 +286,8 @@ pub fn Engine(
             }
             const max_w: u32 = hal.mock.texture_width_max;
             const max_h: u32 = hal.mock.texture_height_max;
-            const w_u32: u32 = @intFromFloat(new_width_px);
-            const h_u32: u32 = @intFromFloat(new_height_px);
+            const w_u32: u32 = @intFromFloat(clamped_w);
+            const h_u32: u32 = @intFromFloat(clamped_h);
             const tex_w = @min(w_u32, max_w);
             const tex_h = @min(h_u32, max_h);
 
@@ -313,7 +323,7 @@ pub fn Engine(
         pub fn renderFrame(self: *Self) void {
             const t0 = time.now();
 
-            // 1. Pack quads from resolved node positions into staging buffer
+            // 1. Pack quads from resolved node positions directly into staging buffer
             self.staged_vertex_count = 0;
             const count = self.tree.node_count;
 
@@ -323,18 +333,19 @@ pub fn Engine(
                 if (rect.width_px <= 0.0 or rect.height_px <= 0.0) continue;
 
                 assert(self.staged_vertex_count + 6 <= max_vertices);
-                const quad_verts = hal.makeQuadVertices(
-                    rect.x_px,
-                    rect.y_px,
-                    rect.width_px,
-                    rect.height_px,
-                    self.node_colors[i],
-                );
+                const out_idx = self.staged_vertex_count;
+                const x0 = rect.x_px;
+                const y0 = rect.y_px;
+                const x1 = x0 + rect.width_px;
+                const y1 = y0 + rect.height_px;
+                const col = self.node_colors[i];
 
-                @memcpy(
-                    self.vertex_staging[self.staged_vertex_count..][0..6],
-                    &quad_verts,
-                );
+                self.vertex_staging[out_idx + 0] = .{ .pos = .{ x0, y0 }, .color = col };
+                self.vertex_staging[out_idx + 1] = .{ .pos = .{ x1, y0 }, .color = col };
+                self.vertex_staging[out_idx + 2] = .{ .pos = .{ x1, y1 }, .color = col };
+                self.vertex_staging[out_idx + 3] = .{ .pos = .{ x1, y1 }, .color = col };
+                self.vertex_staging[out_idx + 4] = .{ .pos = .{ x0, y1 }, .color = col };
+                self.vertex_staging[out_idx + 5] = .{ .pos = .{ x0, y0 }, .color = col };
                 self.staged_vertex_count += 6;
             }
 
@@ -541,4 +552,71 @@ test "Engine v2 resize updates renderFrame vertex staging" {
     // Verify renderFrame now stages quads reflecting 1400px width
     try std.testing.expectEqual(@as(f32, 1400.0), engine.tree.getRect(1).width_px);
     try std.testing.expectEqual(@as(f32, 1400.0), engine.vertex_staging[7].pos[0]);
+}
+
+test "Engine v2 vertical resize re-evaluates heights and Y coordinates" {
+    const TestState = extern struct {
+        scale: f32 = 1.0,
+    };
+
+    const EngineType = Engine(TestState, 8, hal.MockBackend);
+    var engine: EngineType = undefined;
+    engine.init(.{}, 800.0, 600.0);
+
+    const root = engine.addNode(.col, flexbox.INDEX_NONE, 0, .{
+        .pad_px = 10.0,
+        .gap_px = 10.0,
+    }, true, .{ 255, 255, 255, 255 });
+
+    _ = engine.addNode(.button, root, 1, .{
+        .grow = 1.0,
+        .height_px_min = 50.0,
+    }, true, .{ 255, 0, 0, 255 });
+
+    _ = engine.addNode(.button, root, 1, .{
+        .grow = 1.0,
+        .height_px_min = 50.0,
+    }, true, .{ 0, 255, 0, 255 });
+
+    engine.buildLayout();
+
+    // Initial root height is 600
+    try std.testing.expectEqual(@as(f32, 600.0), engine.tree.getRect(0).height_px);
+
+    // Resize viewport height to 900
+    engine.resize(800.0, 900.0);
+
+    // Verify root height updated to 900
+    try std.testing.expectEqual(@as(f32, 900.0), engine.tree.getRect(0).height_px);
+
+    // Node 1 starts at pad = 10, height 50
+    const r1 = engine.tree.getRect(1);
+    try std.testing.expectEqual(@as(f32, 10.0), r1.y_px);
+    try std.testing.expectEqual(@as(f32, 50.0), r1.height_px);
+
+    // Node 2 starts at 10 + 50 + gap(10) = 70, height 50
+    const r2 = engine.tree.getRect(2);
+    try std.testing.expectEqual(@as(f32, 70.0), r2.y_px);
+    try std.testing.expectEqual(@as(f32, 50.0), r2.height_px);
+}
+
+test "Engine v2 large viewport bounds clamping prevents overflow" {
+    const TestState = extern struct {
+        scale: f32 = 1.0,
+    };
+
+    const EngineType = Engine(TestState, 8, hal.MockBackend);
+    var engine: EngineType = undefined;
+    engine.init(.{}, 800.0, 600.0);
+
+    _ = engine.addNode(.col, flexbox.INDEX_NONE, 0, .{}, true, .{ 255, 255, 255, 255 });
+    engine.buildLayout();
+
+    // Resize with oversized dimensions (> 32767.0)
+    engine.resize(50000.0, 60000.0);
+
+    // Viewport dimensions should be clamped to 32767.0
+    try std.testing.expectEqual(@as(f32, 32767.0), engine.viewport_width_px);
+    try std.testing.expectEqual(@as(f32, 32767.0), engine.viewport_height_px);
+    try std.testing.expectEqual(@as(f32, 32767.0), engine.tree.getRect(0).width_px);
 }

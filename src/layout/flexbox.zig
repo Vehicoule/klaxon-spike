@@ -482,10 +482,14 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 assert(self.alpha_l[i] <= 1.9999);
                 assert(self.alpha_r[i] >= -1.9999);
                 assert(self.alpha_r[i] <= 1.9999);
-                self.alpha_l_q14[i] = @intFromFloat(@round(self.alpha_l[i] * SCALE_Q14));
-                self.beta_l_i16[i] = @intFromFloat(@round(self.beta_l[i]));
-                self.alpha_r_q14[i] = @intFromFloat(@round(self.alpha_r[i] * SCALE_Q14));
-                self.beta_r_i16[i] = @intFromFloat(@round(self.beta_r[i]));
+                const al_val = std.math.clamp(self.alpha_l[i] * SCALE_Q14, -32768.0, 32767.0);
+                const ar_val = std.math.clamp(self.alpha_r[i] * SCALE_Q14, -32768.0, 32767.0);
+                const bl_val = std.math.clamp(self.beta_l[i], -32768.0, 32767.0);
+                const br_val = std.math.clamp(self.beta_r[i], -32768.0, 32767.0);
+                self.alpha_l_q14[i] = @intFromFloat(@round(al_val));
+                self.beta_l_i16[i] = @intFromFloat(@round(bl_val));
+                self.alpha_r_q14[i] = @intFromFloat(@round(ar_val));
+                self.beta_r_i16[i] = @intFromFloat(@round(br_val));
             }
 
             // Zero-pad remaining elements up to padded_cap
@@ -550,8 +554,13 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 const x = (al * w_32 + (bl << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
                 const r = (ar * w_32 + (br << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
 
-                const x_16: i16 = @intCast(x);
-                const w_16: i16 = @intCast(r - x);
+                const min_i16: i32 = std.math.minInt(i16);
+                const max_i16: i32 = std.math.maxInt(i16);
+                const clamped_x = std.math.clamp(x, min_i16, max_i16);
+                const clamped_w = std.math.clamp(r - x, min_i16, max_i16);
+
+                const x_16: i16 = @intCast(clamped_x);
+                const w_16: i16 = @intCast(clamped_w);
                 self.resolved_x[i] = x_16;
                 self.resolved_w[i] = w_16;
                 self.rects[i].x_px = @floatFromInt(x_16);
@@ -580,8 +589,14 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 const x_32 = (al_32 * w_v + (bl_32 << shift_v) + bias_v) >> shift_v;
                 const r_32 = (ar_32 * w_v + (br_32 << shift_v) + bias_v) >> shift_v;
                 const w_32 = r_32 - x_32;
-                const x_16: V_i16 = @intCast(x_32);
-                const w_16: V_i16 = @intCast(w_32);
+
+                const min_v: V_i32 = @splat(@as(i32, std.math.minInt(i16)));
+                const max_v: V_i32 = @splat(@as(i32, std.math.maxInt(i16)));
+                const clamped_x_32 = @min(@max(x_32, min_v), max_v);
+                const clamped_w_32 = @min(@max(w_32, min_v), max_v);
+
+                const x_16: V_i16 = @intCast(clamped_x_32);
+                const w_16: V_i16 = @intCast(clamped_w_32);
                 self.resolved_x[i..][0..simd_lane_i16].* = x_16;
                 self.resolved_w[i..][0..simd_lane_i16].* = w_16;
             }
@@ -610,8 +625,13 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 const x = (al * w_32 + (bl << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
                 const r = (ar * w_32 + (br << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
 
-                const x_16: i16 = @intCast(x);
-                const w_16: i16 = @intCast(r - x);
+                const min_i16: i32 = std.math.minInt(i16);
+                const max_i16: i32 = std.math.maxInt(i16);
+                const clamped_x = std.math.clamp(x, min_i16, max_i16);
+                const clamped_w = std.math.clamp(r - x, min_i16, max_i16);
+
+                const x_16: i16 = @intCast(clamped_x);
+                const w_16: i16 = @intCast(clamped_w);
                 self.resolved_x[i] = x_16;
                 self.resolved_w[i] = w_16;
                 self.rects[i].x_px = @floatFromInt(x_16);

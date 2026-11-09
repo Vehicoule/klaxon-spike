@@ -36,9 +36,13 @@ pub const pipeline_pool_capacity: u32 = 8;
 pub const command_buffer_capacity: u32 = 16;
 pub const commands_per_buffer_max: u32 = 128;
 
-// Static BSS Working Sets (Align 64)
-var mock_buffer_data: [buffer_pool_capacity][buffer_bytes_max]u8 align(64) = undefined;
-var mock_texture_data: [texture_pool_capacity][texture_bytes_max]u8 align(64) = undefined;
+pub const device_pool_capacity: u32 = 4;
+
+// Static BSS Working Sets (Align 64) partitioned across independent device instances
+const BufferStorage = [device_pool_capacity][buffer_pool_capacity][buffer_bytes_max]u8;
+const TextureStorage = [device_pool_capacity][texture_pool_capacity][texture_bytes_max]u8;
+var mock_buffer_data: BufferStorage align(64) = undefined;
+var mock_texture_data: TextureStorage align(64) = undefined;
 
 // ============================================================================
 // 2. Vertex Primitive for 2D UI Rendering
@@ -171,6 +175,7 @@ pub const MockBackend = struct {
 
     /// Mock GPU Device holding resource allocation tables.
     pub const Device = struct {
+        device_index: u32 = 0,
         buffers: [buffer_pool_capacity]BufferSlot = @splat(.{}),
         textures: [texture_pool_capacity]TextureSlot = @splat(.{}),
         samplers: [sampler_pool_capacity]SamplerSlot = @splat(.{}),
@@ -178,8 +183,14 @@ pub const MockBackend = struct {
         pipelines: [pipeline_pool_capacity]PipelineSlot = @splat(.{}),
         command_buffers: [command_buffer_capacity]CommandBufferRecord = @splat(.{}),
 
+        var global_device_counter: u32 = 0;
+
         pub fn init(self: *Device) void {
-            self.* = .{};
+            const idx = global_device_counter % device_pool_capacity;
+            global_device_counter +%= 1;
+            self.* = .{
+                .device_index = idx,
+            };
         }
 
         pub fn getBufferData(self: *const Device, handle: hal.Buffer) ?[]u8 {
@@ -188,7 +199,8 @@ pub const MockBackend = struct {
             const slot = &self.buffers[idx];
             if (!slot.active or slot.generation != handle.generation) return null;
             const valid_len: usize = @intCast(@min(slot.desc.size, buffer_bytes_max));
-            return mock_buffer_data[idx][0..valid_len];
+            const dev_idx = self.device_index % device_pool_capacity;
+            return mock_buffer_data[dev_idx][idx][0..valid_len];
         }
 
         pub fn getTextureData(self: *const Device, handle: hal.Texture) ?[]u8 {
@@ -199,7 +211,8 @@ pub const MockBackend = struct {
             const total_bytes = slot.desc.size.width * slot.desc.size.height *
                 slot.desc.format.bytesPerPixel();
             if (total_bytes > texture_bytes_max) return null;
-            return mock_texture_data[idx][0..total_bytes];
+            const dev_idx = self.device_index % device_pool_capacity;
+            return mock_texture_data[dev_idx][idx][0..total_bytes];
         }
     };
 
@@ -259,7 +272,8 @@ pub const MockBackend = struct {
                 device.buffers[i].active = true;
                 device.buffers[i].desc = desc;
                 const valid_len: usize = @intCast(@min(desc.size, buffer_bytes_max));
-                @memset(mock_buffer_data[i][0..valid_len], 0);
+                const dev_idx = device.device_index % device_pool_capacity;
+                @memset(mock_buffer_data[dev_idx][i][0..valid_len], 0);
                 const handle = hal.Buffer{
                     .id = i + 1,
                     .generation = device.buffers[i].generation,
@@ -321,7 +335,8 @@ pub const MockBackend = struct {
                 device.textures[i].desc = desc;
                 const total_bytes = desc.size.width * desc.size.height *
                     desc.format.bytesPerPixel();
-                @memset(mock_texture_data[i][0..total_bytes], 0);
+                const dev_idx = device.device_index % device_pool_capacity;
+                @memset(mock_texture_data[dev_idx][i][0..total_bytes], 0);
 
                 const handle = hal.Texture{
                     .id = i + 1,
@@ -651,6 +666,11 @@ pub const MockBackend = struct {
     // 7. Software Rasterization Execution Core
     // ========================================================================
 
+    /// Bit-exact fast division by 255: ((v + 1) + (v >> 8)) >> 8.
+    pub inline fn div255(v: u32) u32 {
+        return ((v + 1) + (v >> 8)) >> 8;
+    }
+
     fn blendPixelRgba(dst: []u8, src_r: u8, src_g: u8, src_b: u8, alpha: u8) void {
         const inv_a: u32 = 255 - alpha;
         const a: u32 = alpha;
@@ -659,18 +679,18 @@ pub const MockBackend = struct {
         const dst_b: u32 = dst[2];
         const dst_a: u32 = dst[3];
 
-        const out_a: u32 = a + (dst_a * inv_a + 127) / 255;
+        const out_a: u32 = a + div255(dst_a * inv_a + 127);
         if (out_a == 0) return;
 
         if (dst_a == 255) {
-            dst[0] = @intCast((@as(u32, src_r) * a + dst_r * inv_a) / 255);
-            dst[1] = @intCast((@as(u32, src_g) * a + dst_g * inv_a) / 255);
-            dst[2] = @intCast((@as(u32, src_b) * a + dst_b * inv_a) / 255);
+            dst[0] = @intCast(div255(@as(u32, src_r) * a + dst_r * inv_a));
+            dst[1] = @intCast(div255(@as(u32, src_g) * a + dst_g * inv_a));
+            dst[2] = @intCast(div255(@as(u32, src_b) * a + dst_b * inv_a));
             dst[3] = 255;
         } else {
-            const r_num = @as(u32, src_r) * a + (dst_r * dst_a * inv_a) / 255;
-            const g_num = @as(u32, src_g) * a + (dst_g * dst_a * inv_a) / 255;
-            const b_num = @as(u32, src_b) * a + (dst_b * dst_a * inv_a) / 255;
+            const r_num = @as(u32, src_r) * a + div255(dst_r * dst_a * inv_a);
+            const g_num = @as(u32, src_g) * a + div255(dst_g * dst_a * inv_a);
+            const b_num = @as(u32, src_b) * a + div255(dst_b * dst_a * inv_a);
             dst[0] = @intCast(@min(255, (r_num + out_a / 2) / out_a));
             dst[1] = @intCast(@min(255, (g_num + out_a / 2) / out_a));
             dst[2] = @intCast(@min(255, (b_num + out_a / 2) / out_a));
@@ -686,18 +706,18 @@ pub const MockBackend = struct {
         const dst_r: u32 = dst[2];
         const dst_a: u32 = dst[3];
 
-        const out_a: u32 = a + (dst_a * inv_a + 127) / 255;
+        const out_a: u32 = a + div255(dst_a * inv_a + 127);
         if (out_a == 0) return;
 
         if (dst_a == 255) {
-            dst[0] = @intCast((@as(u32, src_b) * a + dst_b * inv_a) / 255);
-            dst[1] = @intCast((@as(u32, src_g) * a + dst_g * inv_a) / 255);
-            dst[2] = @intCast((@as(u32, src_r) * a + dst_r * inv_a) / 255);
+            dst[0] = @intCast(div255(@as(u32, src_b) * a + dst_b * inv_a));
+            dst[1] = @intCast(div255(@as(u32, src_g) * a + dst_g * inv_a));
+            dst[2] = @intCast(div255(@as(u32, src_r) * a + dst_r * inv_a));
             dst[3] = 255;
         } else {
-            const b_num = @as(u32, src_b) * a + (dst_b * dst_a * inv_a) / 255;
-            const g_num = @as(u32, src_g) * a + (dst_g * dst_a * inv_a) / 255;
-            const r_num = @as(u32, src_r) * a + (dst_r * dst_a * inv_a) / 255;
+            const b_num = @as(u32, src_b) * a + div255(dst_b * dst_a * inv_a);
+            const g_num = @as(u32, src_g) * a + div255(dst_g * dst_a * inv_a);
+            const r_num = @as(u32, src_r) * a + div255(dst_r * dst_a * inv_a);
             dst[0] = @intCast(@min(255, (b_num + out_a / 2) / out_a));
             dst[1] = @intCast(@min(255, (g_num + out_a / 2) / out_a));
             dst[2] = @intCast(@min(255, (r_num + out_a / 2) / out_a));
@@ -1821,4 +1841,64 @@ test "MockBackend: Multiple instances rasterized when instance_count > 1" {
     // Pixel at (2, 2) blended twice: 1st blend -> 25, 2nd blend -> 37
     const idx = (2 * 8 + 2) * 4;
     try std.testing.expect(readback[idx + 0] > 25);
+}
+
+test "MockBackend: Fast bitwise division by 255 oracle" {
+    var v: u32 = 0;
+    while (v <= 65534) : (v += 1) {
+        const expected = v / 255;
+        const actual = MockBackend.div255(v);
+        try std.testing.expectEqual(expected, actual);
+    }
+}
+
+test "MockBackend: Independent device instances do not alias simulation memory" {
+    var dev1: MockBackend.Device = undefined;
+    var dev2: MockBackend.Device = undefined;
+    MockBackend.Device.init(&dev1);
+    MockBackend.Device.init(&dev2);
+    try std.testing.expect(dev1.device_index != dev2.device_index);
+
+    const b1 = try MockBackend.createBuffer(&dev1, .{
+        .size = 64,
+        .usage = hal.BufferUsage.vertex_dst,
+    });
+    const b2 = try MockBackend.createBuffer(&dev2, .{
+        .size = 64,
+        .usage = hal.BufferUsage.vertex_dst,
+    });
+    defer MockBackend.destroyBuffer(&dev1, b1);
+    defer MockBackend.destroyBuffer(&dev2, b2);
+
+    const s1 = dev1.getBufferData(b1).?;
+    const s2 = dev2.getBufferData(b2).?;
+
+    s1[0] = 0xAA;
+    s2[0] = 0xBB;
+
+    try std.testing.expectEqual(@as(u8, 0xAA), s1[0]);
+    try std.testing.expectEqual(@as(u8, 0xBB), s2[0]);
+
+    // Verify texture simulation memory isolation
+    const t1 = try MockBackend.createTexture(&dev1, .{
+        .size = .{ .width = 4, .height = 4 },
+        .format = .rgba8_unorm,
+        .usage = hal.TextureUsage.render_target,
+    });
+    const t2 = try MockBackend.createTexture(&dev2, .{
+        .size = .{ .width = 4, .height = 4 },
+        .format = .rgba8_unorm,
+        .usage = hal.TextureUsage.render_target,
+    });
+    defer MockBackend.destroyTexture(&dev1, t1);
+    defer MockBackend.destroyTexture(&dev2, t2);
+
+    const tex1_data = dev1.getTextureData(t1).?;
+    const tex2_data = dev2.getTextureData(t2).?;
+
+    tex1_data[0] = 111;
+    tex2_data[0] = 222;
+
+    try std.testing.expectEqual(@as(u8, 111), tex1_data[0]);
+    try std.testing.expectEqual(@as(u8, 222), tex2_data[0]);
 }
