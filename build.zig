@@ -45,6 +45,18 @@ pub fn build(b: *std.Build) void {
         .{ .name = "core-reactive", .path = "src/core/reactive.zig" },
         .{ .name = "core-engine", .path = "src/root.zig", .filters = &.{"Engine v2"} },
         .{ .name = "layout-flexbox", .path = "src/layout/flexbox.zig" },
+        .{ .name = "paint-sdf", .path = "src/paint/sdf.zig" },
+        .{ .name = "paint-truetype", .path = "src/root.zig", .filters = &.{"TrueType"} },
+        .{
+            .name = "paint-atlas",
+            .path = "src/root.zig",
+            .filters = &.{ "GlyphAtlas", "DoubleBufferedAtlas" },
+        },
+        .{
+            .name = "paint-pipeline-subsystem",
+            .path = "src/root.zig",
+            .filters = &.{"PaintPipeline"},
+        },
         .{ .name = "gpu-tests", .path = "src/gpu/hal.zig" },
         .{ .name = "gpu-mock", .path = "src/gpu/mock.zig" },
         .{ .name = "lint-tests", .path = "tools/lint.zig" },

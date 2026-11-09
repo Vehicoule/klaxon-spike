@@ -8,6 +8,8 @@
 //! - `core`: Engine v2 coordinator, hardware bitmask CTZ reactive dispatcher,
 //!   and generic zero-padding align(64) Structure of Arrays (SoA).
 //! - `layout`: Sub-cycle Flexbox layout with cumulative boundary laws (zero hairline seams).
+//! - `paint`: Analytical typography, zero-libc TrueType font decoder, SIMD4 SDF
+//!   rasterizer, and generational double-buffered texture atlas.
 //!
 //! Standards: TigerStyle (< 100 columns, zero dynamic allocations, zero libc).
 
@@ -25,6 +27,13 @@ pub const layout = struct {
     pub const flexbox = @import("layout/flexbox.zig");
 };
 
+pub const paint = struct {
+    pub const truetype = @import("paint/truetype.zig");
+    pub const sdf = @import("paint/sdf.zig");
+    pub const atlas = @import("paint/atlas.zig");
+    pub const pipeline = @import("paint/pipeline.zig");
+};
+
 test {
     const testing = @import("std").testing;
     testing.refAllDecls(@This());
@@ -35,4 +44,8 @@ test {
     testing.refAllDecls(core.reactive);
     testing.refAllDecls(core.engine);
     testing.refAllDecls(layout.flexbox);
+    testing.refAllDecls(paint.truetype);
+    testing.refAllDecls(paint.sdf);
+    testing.refAllDecls(paint.atlas);
+    testing.refAllDecls(paint.pipeline);
 }
