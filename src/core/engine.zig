@@ -102,15 +102,20 @@ pub fn Engine(
             viewport_w: f32,
             viewport_h: f32,
         ) void {
-            assert(viewport_w > 0.0);
-            assert(viewport_h > 0.0);
+            assert(!std.math.isNan(viewport_w));
+            assert(!std.math.isNan(viewport_h));
+            assert(viewport_w >= 0.0);
+            assert(viewport_h >= 0.0);
+
+            const clamped_w = std.math.clamp(viewport_w, 1.0, 32767.0);
+            const clamped_h = std.math.clamp(viewport_h, 1.0, 32767.0);
 
             self.state = initial_state;
             self.prev_state = initial_state;
             self.dispatcher = .{};
 
-            self.viewport_width_px = viewport_w;
-            self.viewport_height_px = viewport_h;
+            self.viewport_width_px = clamped_w;
+            self.viewport_height_px = clamped_h;
             self.layout_dirty = true;
 
             self.tree.init();
@@ -150,8 +155,8 @@ pub fn Engine(
 
             const max_w: u32 = hal.mock.texture_width_max;
             const max_h: u32 = hal.mock.texture_height_max;
-            const w_u32: u32 = @intFromFloat(viewport_w);
-            const h_u32: u32 = @intFromFloat(viewport_h);
+            const w_u32: u32 = @intFromFloat(clamped_w);
+            const h_u32: u32 = @intFromFloat(clamped_h);
             const tex_w = @min(w_u32, max_w);
             const tex_h = @min(h_u32, max_h);
 
@@ -200,7 +205,8 @@ pub fn Engine(
             self.tree.run4Pass(self.viewport_width_px, self.viewport_height_px);
             self.tree.compileAffine();
             self.tree.partitionElastic();
-            const w_i16: i16 = @intFromFloat(self.viewport_width_px);
+            const clamped_w = std.math.clamp(self.viewport_width_px, 1.0, 32767.0);
+            const w_i16: i16 = @intFromFloat(clamped_w);
             self.tree.solveResizeSimd(w_i16);
             self.layout_dirty = false;
         }
@@ -261,8 +267,10 @@ pub fn Engine(
 
         /// Handles viewport window resize using sub-cycle SIMD Q14 fixed-point layout.
         pub fn resize(self: *Self, new_width_px: f32, new_height_px: f32) void {
-            assert(new_width_px > 0.0);
-            assert(new_height_px > 0.0);
+            assert(!std.math.isNan(new_width_px));
+            assert(!std.math.isNan(new_height_px));
+            assert(new_width_px >= 0.0);
+            assert(new_height_px >= 0.0);
 
             const t0 = time.now();
 
@@ -273,7 +281,7 @@ pub fn Engine(
             self.viewport_width_px = clamped_w;
             self.viewport_height_px = clamped_h;
 
-            if (height_changed) {
+            if (height_changed or self.layout_dirty) {
                 self.tree.run4Pass(self.viewport_width_px, self.viewport_height_px);
             }
 
@@ -311,6 +319,9 @@ pub fn Engine(
 
             const t0 = time.now();
             self.tree.run4Pass(self.viewport_width_px, self.viewport_height_px);
+            const clamped_w = std.math.clamp(self.viewport_width_px, 1.0, 32767.0);
+            const w_i16: i16 = @intFromFloat(clamped_w);
+            self.tree.solveResizeSimd(w_i16);
             self.layout_dirty = false;
 
             const t1 = time.now();
@@ -619,4 +630,74 @@ test "Engine v2 large viewport bounds clamping prevents overflow" {
     try std.testing.expectEqual(@as(f32, 32767.0), engine.viewport_width_px);
     try std.testing.expectEqual(@as(f32, 32767.0), engine.viewport_height_px);
     try std.testing.expectEqual(@as(f32, 32767.0), engine.tree.getRect(0).width_px);
+}
+
+test "Engine v2 initial oversized viewport clamping prevents overflow" {
+    const TestState = extern struct {
+        scale: f32 = 1.0,
+    };
+
+    const EngineType = Engine(TestState, 8, hal.MockBackend);
+    var engine: EngineType = undefined;
+    // Initializing directly with dimensions > 32767.0 must clamp to 32767.0
+    engine.init(.{}, 50000.0, 60000.0);
+
+    _ = engine.addNode(.col, flexbox.INDEX_NONE, 0, .{}, true, .{ 255, 255, 255, 255 });
+    engine.buildLayout();
+
+    try std.testing.expectEqual(@as(f32, 32767.0), engine.viewport_width_px);
+    try std.testing.expectEqual(@as(f32, 32767.0), engine.viewport_height_px);
+    try std.testing.expectEqual(@as(f32, 32767.0), engine.tree.getRect(0).width_px);
+    try std.testing.expectEqual(@as(f32, 32767.0), engine.tree.getRect(0).height_px);
+}
+
+test "Engine v2 resize with identical height honors pending dirty layout" {
+    const TestState = extern struct {
+        scale: f32 = 1.0,
+    };
+
+    const EngineType = Engine(TestState, 8, hal.MockBackend);
+    var engine: EngineType = undefined;
+    engine.init(.{}, 800.0, 600.0);
+
+    const root = engine.addNode(.col, flexbox.INDEX_NONE, 0, .{
+        .pad_px = 10.0,
+    }, true, .{ 255, 255, 255, 255 });
+
+    const btn = engine.addNode(.button, root, 1, .{
+        .height_px_min = 40.0,
+    }, true, .{ 255, 0, 0, 255 });
+
+    engine.buildLayout();
+    try std.testing.expectEqual(@as(f32, 40.0), engine.tree.getRect(btn).height_px);
+
+    // Mutate child style directly and mark layout dirty
+    engine.tree.nodes[btn].style.height_px_min = 120.0;
+    engine.layout_dirty = true;
+
+    // Resize viewport with identical height: dirty layout must still be solved
+    engine.resize(1000.0, 600.0);
+
+    try std.testing.expectEqual(@as(bool, false), engine.layout_dirty);
+    try std.testing.expectEqual(@as(f32, 120.0), engine.tree.getRect(btn).height_px);
+}
+
+test "Engine v2 resize with 0x0 collapsed viewport clamps to 1x1" {
+    const TestState = extern struct {
+        scale: f32 = 1.0,
+    };
+
+    const EngineType = Engine(TestState, 8, hal.MockBackend);
+    var engine: EngineType = undefined;
+    engine.init(.{}, 800.0, 600.0);
+
+    _ = engine.addNode(.col, flexbox.INDEX_NONE, 0, .{}, true, .{ 255, 255, 255, 255 });
+    engine.buildLayout();
+
+    // Resize with 0.0 dimensions (e.g. window minimized)
+    engine.resize(0.0, 0.0);
+
+    try std.testing.expectEqual(@as(f32, 1.0), engine.viewport_width_px);
+    try std.testing.expectEqual(@as(f32, 1.0), engine.viewport_height_px);
+    try std.testing.expectEqual(@as(f32, 1.0), engine.tree.getRect(0).width_px);
 }

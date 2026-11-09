@@ -193,6 +193,11 @@ pub const MockBackend = struct {
             };
         }
 
+        pub fn deinit(self: *Device) void {
+            // Explicit lifecycle cleanup for MockBackend Device instance.
+            _ = self;
+        }
+
         pub fn getBufferData(self: *const Device, handle: hal.Buffer) ?[]u8 {
             if (handle.id == 0 or handle.id > buffer_pool_capacity) return null;
             const idx = handle.id - 1;
@@ -666,7 +671,8 @@ pub const MockBackend = struct {
     // 7. Software Rasterization Execution Core
     // ========================================================================
 
-    /// Bit-exact fast division by 255: ((v + 1) + (v >> 8)) >> 8.
+    /// Bit-exact fast division by 255 for v in [0, 65534]: ((v + 1) + (v >> 8)) >> 8.
+    /// Bit-exact across all 8-bit color channel multiplications (max: 255 * 255 = 65025).
     pub inline fn div255(v: u32) u32 {
         return ((v + 1) + (v >> 8)) >> 8;
     }
