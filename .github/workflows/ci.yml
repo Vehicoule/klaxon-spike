@@ -266,7 +266,9 @@ jobs:
           version: 0.17.1
 
       - name: Install QEMU User Static
-        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-binfmt || sudo apt-get install -y qemu-user-static || sudo apt-get install -y qemu-user
 
       - name: Cross-Compile Android ARM64 Test & Flagship Benchmark Binaries
         run: |
@@ -280,13 +282,14 @@ jobs:
 
       - name: Execute Android ARM64 via QEMU User Space
         run: |
-          qemu-aarch64-static ./test_paint_android
-          qemu-aarch64-static ./test_resize_android
-          qemu-aarch64-static ./engine_android
-          qemu-aarch64-static ./resize_android
-          qemu-aarch64-static ./perf_android
-          qemu-aarch64-static ./alt_android
-          qemu-aarch64-static ./truetype_android
+          QEMU_EXEC=$(which qemu-aarch64-static 2>/dev/null || which qemu-aarch64 2>/dev/null || echo "qemu-aarch64-static")
+          $QEMU_EXEC ./test_paint_android
+          $QEMU_EXEC ./test_resize_android
+          $QEMU_EXEC ./engine_android
+          $QEMU_EXEC ./resize_android
+          $QEMU_EXEC ./perf_android
+          $QEMU_EXEC ./alt_android
+          $QEMU_EXEC ./truetype_android
 
   test-and-bench-freebsd:
     name: Test & Bench (FreeBSD 14 VM via vmactions)
