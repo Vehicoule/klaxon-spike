@@ -33,10 +33,18 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------------
     const test_step = b.step("test", "Run all unit tests and fuzzer spikes");
 
-    const tests = [_]struct { name: []const u8, path: []const u8 }{
+    const tests = [_]struct {
+        name: []const u8,
+        path: []const u8,
+        filters: []const []const u8 = &.{},
+    }{
         .{ .name = "root", .path = "src/root.zig" },
         .{ .name = "platform-os", .path = "src/platform/os.zig" },
         .{ .name = "platform-time", .path = "src/platform/time.zig" },
+        .{ .name = "core-soa", .path = "src/core/soa.zig" },
+        .{ .name = "core-reactive", .path = "src/core/reactive.zig" },
+        .{ .name = "core-engine", .path = "src/root.zig", .filters = &.{"Engine v2"} },
+        .{ .name = "layout-flexbox", .path = "src/layout/flexbox.zig" },
         .{ .name = "gpu-tests", .path = "src/gpu/hal.zig" },
         .{ .name = "gpu-mock", .path = "src/gpu/mock.zig" },
         .{ .name = "lint-tests", .path = "tools/lint.zig" },
@@ -57,6 +65,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = test_opt,
             }),
+            .filters = t.filters,
         });
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);
