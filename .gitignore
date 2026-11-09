@@ -1,0 +1,15 @@
+# Build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# OS / Editor artifacts
+.DS_Store
+*.swp
+*~
+.agents/
+.vscode/
+.idea/
+
+# Scratch & temporary artifacts
+/tmp/
