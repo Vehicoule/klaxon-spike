@@ -5,9 +5,9 @@ zig-out/
 
 # OS / Editor artifacts
 .DS_Store
+**/.DS_Store
 *.swp
 *~
-.agents/
 .vscode/
 .idea/
 
