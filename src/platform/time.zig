@@ -27,8 +27,11 @@ pub const Timestamp = struct {
     /// Asserts that this timestamp is chronologically at or after `earlier`.
     pub fn durationSince(self: Timestamp, earlier: Timestamp) u64 {
         assert(self.ns >= earlier.ns);
-        if (self.ns < earlier.ns) return 0;
-        return self.ns - earlier.ns;
+        if (self.ns >= earlier.ns) {
+            return self.ns - earlier.ns;
+        } else {
+            return 0;
+        }
     }
 
     /// Converts this timestamp duration into CPU cycles at 4.0 GHz reference clock.
@@ -98,9 +101,10 @@ pub const BenchmarkStats = struct {
     }
 
     /// Computes reference CPU cycles at 4.0 GHz corresponding to the mean duration.
+    /// Preserves sub-nanosecond fractional resolution before converting to cycles.
     pub fn cyclesAt4Ghz(self: BenchmarkStats) u64 {
         if (self.count == 0) return 0;
-        return toCyclesAt4Ghz(@intFromFloat(self.meanNs()));
+        return @intFromFloat(self.meanNs() * 4.0);
     }
 
     /// Resets all accumulated values to zero.
@@ -208,4 +212,14 @@ test "BenchmarkStats empty slice handling" {
     try std.testing.expectEqual(@as(u64, 0), stats.count);
     try std.testing.expectEqual(@as(u64, 0), stats.total_ns);
     try std.testing.expectEqual(@as(f64, 0.0), stats.meanNs());
+}
+
+test "BenchmarkStats fractional nanosecond precision in cyclesAt4Ghz" {
+    var stats = BenchmarkStats.empty;
+    // 2 ns + 3 ns -> total 5 ns across 2 runs -> mean 2.5 ns.
+    // 2.5 ns * 4.0 GHz = exactly 10 reference cycles.
+    stats.record(2);
+    stats.record(3);
+    try std.testing.expectEqual(@as(f64, 2.5), stats.meanNs());
+    try std.testing.expectEqual(@as(u64, 10), stats.cyclesAt4Ghz());
 }

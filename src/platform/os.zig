@@ -17,18 +17,18 @@ const assert = std.debug.assert;
 // Target Platform Classifications
 // ============================================================================
 
-pub const is_windows = (builtin.os.tag == .windows);
-pub const is_darwin = (builtin.os.tag == .macos or
-    builtin.os.tag == .ios or
-    builtin.os.tag == .tvos or
-    builtin.os.tag == .watchos or
-    builtin.os.tag == .visionos);
-pub const is_linux = (builtin.os.tag == .linux);
-pub const is_posix = (builtin.os.tag != .windows and
-    builtin.os.tag != .freestanding and
-    builtin.os.tag != .wasi);
-pub const is_wasm = builtin.cpu.arch.isWasm();
-pub const is_freestanding = (builtin.os.tag == .freestanding);
+pub const is_windows = (builtin.target.os.tag == .windows);
+pub const is_darwin = (builtin.target.os.tag == .macos or
+    builtin.target.os.tag == .ios or
+    builtin.target.os.tag == .tvos or
+    builtin.target.os.tag == .watchos or
+    builtin.target.os.tag == .visionos);
+pub const is_linux = (builtin.target.os.tag == .linux);
+pub const is_posix = (builtin.target.os.tag != .windows and
+    builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
+pub const is_wasm = builtin.target.cpu.arch.isWasm();
+pub const is_freestanding = (builtin.target.os.tag == .freestanding);
 
 // ============================================================================
 // Win32 Direct Kernel Declarations (Zero Libc / Windows SDK Header-Free)
@@ -38,6 +38,7 @@ const STD_OUTPUT_HANDLE: i32 = -11;
 const STD_ERROR_HANDLE: i32 = -12;
 const GENERIC_READ: u32 = 0x80000000;
 const GENERIC_WRITE: u32 = 0x40000000;
+const FILE_APPEND_DATA: u32 = 0x00000004;
 const FILE_SHARE_READ: u32 = 0x00000001;
 const FILE_SHARE_WRITE: u32 = 0x00000002;
 const CREATE_ALWAYS: u32 = 2;
@@ -45,7 +46,19 @@ const OPEN_EXISTING: u32 = 3;
 const OPEN_ALWAYS: u32 = 4;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 
+// Win32 error codes
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_SHARING_VIOLATION: u32 = 32;
+const ERROR_HANDLE_EOF: u32 = 38;
+const ERROR_HANDLE_DISK_FULL: u32 = 39;
+const ERROR_BUFFER_OVERFLOW: u32 = 111;
+const ERROR_DISK_FULL: u32 = 112;
+const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
+
 extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 
 extern "kernel32" fn WriteFile(
     hFile: ?*anyopaque,
@@ -88,17 +101,24 @@ pub fn readMonotonicClockNs() u64 {
     if (is_windows) {
         var count: i64 = 0;
         var freq: i64 = 0;
-        _ = QueryPerformanceCounter(&count);
-        _ = QueryPerformanceFrequency(&freq);
-        if (freq <= 0) return 0;
+        const qpc_ok = QueryPerformanceCounter(&count);
+        const qpf_ok = QueryPerformanceFrequency(&freq);
+        if (qpc_ok == 0 or qpf_ok == 0) return 0;
+        if (freq <= 0 or count <= 0) return 0;
         return @intCast(@divFloor(@as(i128, count) * 1_000_000_000, freq));
     } else if (is_posix) {
         var ts: std.posix.timespec = undefined;
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+        const rc = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+        if (std.posix.errno(rc) != .SUCCESS) return 0;
+        if (ts.sec < 0 or ts.nsec < 0) return 0;
         return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
     } else {
-        // Freestanding fallback: deterministic step counter
-        return 0;
+        // Freestanding fallback: strictly increasing step counter.
+        const S = struct {
+            var step_counter: u64 = 1_000;
+        };
+        S.step_counter +%= 1;
+        return S.step_counter;
     }
 }
 
@@ -112,28 +132,58 @@ pub inline fn toCyclesAt4Ghz(ns: u64) u64 {
 // Direct Standard Output & Error (Zero Heap Allocation)
 // ============================================================================
 
-/// Emits raw bytes directly to standard output without buffering or dynamic memory.
-pub fn writeStdout(bytes: []const u8) void {
+fn writeAllToStream(posix_fd: std.posix.fd_t, win_std_handle: i32, bytes: []const u8) void {
     if (bytes.len == 0) return;
     if (is_windows) {
-        const handle = GetStdHandle(STD_OUTPUT_HANDLE);
-        var written: u32 = 0;
-        _ = WriteFile(handle, bytes.ptr, @intCast(bytes.len), &written, null);
+        const handle = GetStdHandle(win_std_handle);
+        if (handle == null) return;
+        var written_total: usize = 0;
+        while (written_total < bytes.len) {
+            const chunk_len: u32 = @intCast(@min(
+                bytes.len - written_total,
+                std.math.maxInt(u32),
+            ));
+            var chunk_written: u32 = 0;
+            const ok = WriteFile(
+                handle,
+                bytes[written_total..].ptr,
+                chunk_len,
+                &chunk_written,
+                null,
+            );
+            if (ok == 0 or chunk_written == 0) break;
+            written_total += chunk_written;
+        }
     } else if (is_posix) {
-        _ = std.posix.system.write(1, bytes.ptr, bytes.len);
+        var written_total: usize = 0;
+        while (written_total < bytes.len) {
+            const max_chunk = switch (builtin.target.os.tag) {
+                .linux => @as(usize, 0x7ffff000),
+                else => @as(usize, std.math.maxInt(i32)),
+            };
+            const chunk_len = @min(bytes.len - written_total, max_chunk);
+            const rc = std.posix.system.write(posix_fd, bytes[written_total..].ptr, chunk_len);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    const n: usize = @intCast(rc);
+                    if (n == 0) break;
+                    written_total += n;
+                },
+                .INTR => continue,
+                else => break,
+            }
+        }
     }
+}
+
+/// Emits raw bytes directly to standard output without buffering or dynamic memory.
+pub fn writeStdout(bytes: []const u8) void {
+    writeAllToStream(1, STD_OUTPUT_HANDLE, bytes);
 }
 
 /// Emits raw bytes directly to standard error without buffering or dynamic memory.
 pub fn writeStderr(bytes: []const u8) void {
-    if (bytes.len == 0) return;
-    if (is_windows) {
-        const handle = GetStdHandle(STD_ERROR_HANDLE);
-        var written: u32 = 0;
-        _ = WriteFile(handle, bytes.ptr, @intCast(bytes.len), &written, null);
-    } else if (is_posix) {
-        _ = std.posix.system.write(2, bytes.ptr, bytes.len);
-    }
+    writeAllToStream(2, STD_ERROR_HANDLE, bytes);
 }
 
 // ============================================================================
@@ -156,9 +206,12 @@ pub const FileHandle = struct {
         if (is_windows) {
             const val: usize = @intFromPtr(self.handle);
             const inv: usize = @bitCast(@as(isize, -1));
-            return val != 0 and val != inv;
+            if (val == 0) return false;
+            if (val == inv) return false;
+            return true;
         } else if (is_posix) {
-            return self.handle >= 0;
+            if (self.handle < 0) return false;
+            return true;
         } else {
             return false;
         }
@@ -178,6 +231,7 @@ pub const FileError = error{
     AccessDenied,
     PathTooLong,
     DiskFull,
+    BufferTooSmall,
     Unexpected,
     Unsupported,
 };
@@ -198,11 +252,11 @@ pub fn openFile(path: []const u8, mode: OpenMode) FileError!FileHandle {
             .write_only => GENERIC_WRITE,
             .read_write => GENERIC_READ | GENERIC_WRITE,
             .create_truncate => GENERIC_WRITE,
-            .create_append => GENERIC_WRITE,
+            .create_append => FILE_APPEND_DATA,
         };
         const disp: u32 = switch (mode) {
             .read_only => OPEN_EXISTING,
-            .write_only => CREATE_ALWAYS,
+            .write_only => OPEN_EXISTING,
             .read_write => OPEN_ALWAYS,
             .create_truncate => CREATE_ALWAYS,
             .create_append => OPEN_ALWAYS,
@@ -219,13 +273,20 @@ pub fn openFile(path: []const u8, mode: OpenMode) FileError!FileHandle {
         );
         const inv: usize = @bitCast(@as(isize, -1));
         if (res == null or @intFromPtr(res) == inv) {
-            return FileError.FileNotFound;
+            const err_code = GetLastError();
+            switch (err_code) {
+                ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND => return FileError.FileNotFound,
+                ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION => return FileError.AccessDenied,
+                ERROR_FILENAME_EXCED_RANGE, ERROR_BUFFER_OVERFLOW => return FileError.PathTooLong,
+                ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL => return FileError.DiskFull,
+                else => return FileError.Unexpected,
+            }
         }
         return .{ .handle = res.? };
     } else if (is_posix) {
         const flags: std.posix.O = switch (mode) {
             .read_only => .{ .ACCMODE = .RDONLY },
-            .write_only => .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+            .write_only => .{ .ACCMODE = .WRONLY },
             .read_write => .{ .ACCMODE = .RDWR, .CREAT = true },
             .create_truncate => .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
             .create_append => .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
@@ -254,18 +315,29 @@ pub fn readFile(handle: FileHandle, dest: []u8) FileError!usize {
     if (dest.len == 0) return 0;
 
     if (is_windows) {
+        const to_read: u32 = @intCast(@min(dest.len, std.math.maxInt(u32)));
         var bytes_read: u32 = 0;
         const ok = ReadFile(
             handle.handle,
             dest.ptr,
-            @intCast(dest.len),
+            to_read,
             &bytes_read,
             null,
         );
-        if (ok == 0) return FileError.Unexpected;
+        if (ok == 0) {
+            const err_code = GetLastError();
+            switch (err_code) {
+                ERROR_HANDLE_EOF => return 0,
+                ERROR_ACCESS_DENIED => return FileError.AccessDenied,
+                else => return FileError.Unexpected,
+            }
+        }
         return @intCast(bytes_read);
     } else if (is_posix) {
-        const n = std.posix.read(handle.handle, dest) catch return FileError.Unexpected;
+        const n = std.posix.read(handle.handle, dest) catch |err| switch (err) {
+            error.AccessDenied => return FileError.AccessDenied,
+            else => return FileError.Unexpected,
+        };
         return n;
     } else {
         return FileError.Unsupported;
@@ -278,20 +350,40 @@ pub fn writeFile(handle: FileHandle, src: []const u8) FileError!usize {
     if (src.len == 0) return 0;
 
     if (is_windows) {
+        const to_write: u32 = @intCast(@min(src.len, std.math.maxInt(u32)));
         var bytes_written: u32 = 0;
         const ok = WriteFile(
             handle.handle,
             src.ptr,
-            @intCast(src.len),
+            to_write,
             &bytes_written,
             null,
         );
-        if (ok == 0) return FileError.Unexpected;
+        if (ok == 0) {
+            const err_code = GetLastError();
+            switch (err_code) {
+                ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL => return FileError.DiskFull,
+                ERROR_ACCESS_DENIED => return FileError.AccessDenied,
+                else => return FileError.Unexpected,
+            }
+        }
         return @intCast(bytes_written);
     } else if (is_posix) {
-        const rc = std.posix.system.write(handle.handle, src.ptr, src.len);
-        if (std.posix.errno(rc) != .SUCCESS) return FileError.Unexpected;
-        return @intCast(rc);
+        const max_chunk = switch (builtin.target.os.tag) {
+            .linux => @as(usize, 0x7ffff000),
+            else => @as(usize, std.math.maxInt(i32)),
+        };
+        const to_write = @min(src.len, max_chunk);
+        while (true) {
+            const rc = std.posix.system.write(handle.handle, src.ptr, to_write);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                .NOSPC => return FileError.DiskFull,
+                .ACCES, .PERM => return FileError.AccessDenied,
+                else => return FileError.Unexpected,
+            }
+        }
     } else {
         return FileError.Unsupported;
     }
@@ -301,9 +393,14 @@ pub fn writeFile(handle: FileHandle, src: []const u8) FileError!usize {
 pub fn closeFile(handle: FileHandle) void {
     if (!handle.isValid()) return;
     if (is_windows) {
-        _ = CloseHandle(handle.handle);
+        const ok = CloseHandle(handle.handle);
+        _ = ok;
     } else if (is_posix) {
-        _ = std.posix.system.close(handle.handle);
+        const rc = std.posix.system.close(handle.handle);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS, .INTR => {},
+            else => {},
+        }
     }
 }
 
@@ -337,12 +434,17 @@ pub fn getFileSize(handle: FileHandle) FileError!u64 {
 }
 
 /// Streams an entire file into a caller-provided buffer without heap allocation.
+/// Returns `FileError.BufferTooSmall` if the file exceeds the buffer capacity.
 pub fn readFileToBuffer(path: []const u8, buffer: []u8) FileError!usize {
     assert(path.len > 0);
-    assert(buffer.len > 0);
 
     const handle = try openFile(path, .read_only);
     defer closeFile(handle);
+
+    const file_size = try getFileSize(handle);
+    if (file_size > buffer.len) {
+        return FileError.BufferTooSmall;
+    }
 
     var total_read: usize = 0;
     while (total_read < buffer.len) {
@@ -350,6 +452,14 @@ pub fn readFileToBuffer(path: []const u8, buffer: []u8) FileError!usize {
         if (n == 0) break;
         total_read += n;
     }
+
+    // Probe 1 extra byte to detect concurrent append or truncation mismatch.
+    var extra: [1]u8 = undefined;
+    const extra_read = try readFile(handle, &extra);
+    if (extra_read > 0) {
+        return FileError.BufferTooSmall;
+    }
+
     return total_read;
 }
 
@@ -357,7 +467,8 @@ pub fn readFileToBuffer(path: []const u8, buffer: []u8) FileError!usize {
 // Minimal Standalone Panic Handler (No libc, zero heap allocation)
 // ============================================================================
 
-pub fn minimalPanic(message: []const u8, _: ?usize) noreturn {
+pub fn minimalPanic(message: []const u8, first_trace_addr: ?usize) noreturn {
+    _ = first_trace_addr;
     writeStderr("PANIC: ");
     writeStderr(message);
     writeStderr("\n");
@@ -367,6 +478,26 @@ pub fn minimalPanic(message: []const u8, _: ?usize) noreturn {
 // ============================================================================
 // Unit Tests & Invariant Verification
 // ============================================================================
+
+fn makeTestPath(buf: []u8, prefix: []const u8) ![:0]const u8 {
+    assert(buf.len >= 64);
+    const slice = if (is_windows)
+        try std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}_{d}.tmp", .{
+            prefix,
+            readMonotonicClockNs(),
+        })
+    else if (is_posix)
+        try std.fmt.bufPrint(
+            buf[0 .. buf.len - 1],
+            "/tmp/{s}_{d}_{d}.tmp",
+            .{ prefix, std.posix.system.getpid(), readMonotonicClockNs() },
+        )
+    else
+        return error.Unsupported;
+
+    buf[slice.len] = 0;
+    return buf[0..slice.len :0];
+}
 
 test "Monotonic time sanity & strict monotonicity" {
     const t0 = readMonotonicClockNs();
@@ -386,10 +517,8 @@ test "Monotonic time sanity & strict monotonicity" {
 test "File I/O operations round-trip in /tmp" {
     if (is_freestanding or is_wasm) return error.SkipZigTest;
 
-    const test_path: [:0]const u8 = if (is_windows)
-        "klaxon_test_platform_io.tmp"
-    else
-        "/tmp/klaxon_test_platform_io.txt";
+    var path_buf: [128]u8 = undefined;
+    const test_path = try makeTestPath(&path_buf, "klaxon_io_roundtrip");
     defer if (is_posix) {
         _ = std.posix.system.unlink(test_path);
     };
@@ -412,6 +541,54 @@ test "File I/O operations round-trip in /tmp" {
     const bytes_read = try readFileToBuffer(test_path, &read_buffer);
     try std.testing.expectEqual(payload.len, bytes_read);
     try std.testing.expectEqualStrings(payload, read_buffer[0..bytes_read]);
+
+    // Test buffer too small condition
+    var small_buffer: [16]u8 = undefined;
+    const err = readFileToBuffer(test_path, &small_buffer);
+    try std.testing.expectError(FileError.BufferTooSmall, err);
+}
+
+test "File I/O empty file handling" {
+    if (is_freestanding or is_wasm) return error.SkipZigTest;
+
+    var path_buf: [128]u8 = undefined;
+    const empty_path = try makeTestPath(&path_buf, "klaxon_io_empty");
+    defer if (is_posix) {
+        _ = std.posix.system.unlink(empty_path);
+    };
+
+    const handle = try openFile(empty_path, .create_truncate);
+    closeFile(handle);
+
+    var empty_buf: [0]u8 = undefined;
+    const read_bytes = try readFileToBuffer(empty_path, &empty_buf);
+    try std.testing.expectEqual(@as(usize, 0), read_bytes);
+}
+
+test "File I/O write_only preserves remaining bytes" {
+    if (is_freestanding or is_wasm) return error.SkipZigTest;
+
+    var path_buf: [128]u8 = undefined;
+    const test_path = try makeTestPath(&path_buf, "klaxon_io_write_only");
+    defer if (is_posix) {
+        _ = std.posix.system.unlink(test_path);
+    };
+
+    // Create file with initial content
+    const init_handle = try openFile(test_path, .create_truncate);
+    _ = try writeFile(init_handle, "ABCDEFGHIJ");
+    closeFile(init_handle);
+
+    // Reopen write_only and overwrite only first 3 bytes
+    const wo_handle = try openFile(test_path, .write_only);
+    _ = try writeFile(wo_handle, "123");
+    closeFile(wo_handle);
+
+    // Verify remaining bytes are intact
+    var read_buf: [16]u8 = undefined;
+    const bytes_read = try readFileToBuffer(test_path, &read_buf);
+    try std.testing.expectEqual(@as(usize, 10), bytes_read);
+    try std.testing.expectEqualStrings("123DEFGHIJ", read_buf[0..bytes_read]);
 }
 
 test "Direct stdout/stderr emission without crash" {
