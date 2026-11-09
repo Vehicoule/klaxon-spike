@@ -230,14 +230,14 @@ pub const GlyphAtlas = struct {
             }
         }
 
-        if (evicted > 0) {
+        if (self.allocated_glyph_count == 0) {
             const tofu_w: u32 = 16;
             const tofu_h: u32 = 24;
             self.shelf_x_px = atlas_padding_px + tofu_w + 2 * atlas_padding_px;
             self.shelf_y_px = atlas_padding_px;
             self.shelf_height_px = tofu_h + 2 * atlas_padding_px;
         } else {
-            // All surveyed slots are pinned on-screen: anti-thrashing rule
+            // Atlas slots remain pinned on-screen: anti-thrashing rule preserves on-screen quads
             self.pinned_set_overflow = true;
             self.pinned_overflow_count += 1;
         }
@@ -252,16 +252,13 @@ pub const GlyphAtlas = struct {
             const slot_index = (initial_index + step) & (glyph_hash_capacity - 1);
             if (self.slot_occupied[slot_index]) {
                 const candidate = self.slot_keys[slot_index];
-                if (candidate.glyph_index == key.glyph_index) {
-                    if (candidate.font_id == key.font_id) {
-                        if (candidate.size_px == key.size_px) {
-                            self.slot_data[slot_index].last_frame = self.current_frame;
-                            return self.slot_data[slot_index];
-                        }
-                    }
+                if (candidate.glyph_index == key.glyph_index and
+                    candidate.font_id == key.font_id and
+                    candidate.size_px == key.size_px)
+                {
+                    self.slot_data[slot_index].last_frame = self.current_frame;
+                    return self.slot_data[slot_index];
                 }
-            } else {
-                return null;
             }
         }
         return null;
@@ -285,6 +282,43 @@ pub const GlyphAtlas = struct {
             return existing;
         }
 
+        // 1. Resolve target slot in open addressing hash table with bounded probing
+        const initial_index = hashGlyphKey(key) & (glyph_hash_capacity - 1);
+        var step: u32 = 0;
+        var target_slot_index: ?u32 = null;
+        var oldest_slot_index: u32 = initial_index;
+        var oldest_frame: u32 = std.math.maxInt(u32);
+
+        while (step < probe_limit_max) : (step += 1) {
+            const slot_index = (initial_index + step) & (glyph_hash_capacity - 1);
+            if (!self.slot_occupied[slot_index]) {
+                if (target_slot_index == null) target_slot_index = slot_index;
+            } else {
+                const candidate = self.slot_keys[slot_index];
+                if (candidate.glyph_index == key.glyph_index and
+                    candidate.font_id == key.font_id and
+                    candidate.size_px == key.size_px)
+                {
+                    self.slot_data[slot_index].last_frame = self.current_frame;
+                    return self.slot_data[slot_index];
+                }
+                const slot_frame = self.slot_data[slot_index].last_frame;
+                if (slot_frame < oldest_frame) {
+                    oldest_frame = slot_frame;
+                    oldest_slot_index = slot_index;
+                }
+            }
+        }
+
+        if (target_slot_index == null and oldest_frame == self.current_frame) {
+            self.pinned_set_overflow = true;
+            self.pinned_overflow_count += 1;
+            return self.tofu_slot;
+        }
+
+        const final_index = target_slot_index orelse oldest_slot_index;
+
+        // 2. Shelf allocation for glyph bounding box
         const padded_w = width_px + 2 * atlas_padding_px;
         const padded_h = height_px + 2 * atlas_padding_px;
 
@@ -305,7 +339,7 @@ pub const GlyphAtlas = struct {
 
         if (!can_fit) {
             const evicted = self.evictGenerational();
-            if (evicted == 0) {
+            if (evicted == 0 or self.allocated_glyph_count > 0) {
                 return self.tofu_slot;
             }
             if (self.shelf_x_px + padded_w <= atlas_dimension_px and
@@ -323,7 +357,7 @@ pub const GlyphAtlas = struct {
         self.shelf_x_px += padded_w;
         self.shelf_height_px = @max(self.shelf_height_px, padded_h);
 
-        // Copy bitmap rows into atlas texture buffer
+        // 3. Copy bitmap rows into atlas texture buffer
         var y: u32 = 0;
         while (y < height_px) : (y += 1) {
             const src_row_start = y * width_px;
@@ -333,7 +367,7 @@ pub const GlyphAtlas = struct {
             @memcpy(dst_slice, src_slice);
         }
 
-        // Update dirty bounding rectangle
+        // 4. Update dirty bounding rectangle
         const x0: u16 = @intCast(placed_x);
         const y0: u16 = @intCast(placed_y);
         const x1: u16 = @intCast(placed_x + width_px);
@@ -375,34 +409,7 @@ pub const GlyphAtlas = struct {
             .last_frame = self.current_frame,
         };
 
-        // Insert into open addressing hash table with bounded probing
-        const initial_index = hashGlyphKey(key) & (glyph_hash_capacity - 1);
-        var step: u32 = 0;
-        var target_slot_index: ?u32 = null;
-        var oldest_slot_index: u32 = initial_index;
-        var oldest_frame: u32 = std.math.maxInt(u32);
-
-        while (step < probe_limit_max) : (step += 1) {
-            const slot_index = (initial_index + step) & (glyph_hash_capacity - 1);
-            if (!self.slot_occupied[slot_index]) {
-                target_slot_index = slot_index;
-                break;
-            } else {
-                const slot_frame = self.slot_data[slot_index].last_frame;
-                if (slot_frame < oldest_frame) {
-                    oldest_frame = slot_frame;
-                    oldest_slot_index = slot_index;
-                }
-            }
-        }
-
-        if (target_slot_index == null and oldest_frame == self.current_frame) {
-            self.pinned_set_overflow = true;
-            self.pinned_overflow_count += 1;
-            return self.tofu_slot;
-        }
-
-        const final_index = target_slot_index orelse oldest_slot_index;
+        // 5. Store resolved slot in hash table
         if (!self.slot_occupied[final_index]) {
             self.allocated_glyph_count += 1;
         }
@@ -447,6 +454,10 @@ pub fn processRasterBatchWithTimeBudget(
         // TigerStyle Forward Progress Guarantee:
         // Always allows at least one glyph per frame even if budget is tight or jittered.
         if (rasterized_count == 0 or atlas.hasTimeBudget()) {
+            if (req.width_px == 0 or req.height_px == 0) {
+                slots_out[idx] = atlas.tofu_slot;
+                continue;
+            }
             var patch_buf: [32 * 32]u8 = undefined;
             const w: u32 = @min(32, req.width_px);
             const h: u32 = @min(32, req.height_px);
@@ -608,4 +619,67 @@ test "DoubleBufferedAtlas swapping and bank independence" {
     const b1 = double_atlas.getActive();
     try std.testing.expectEqual(@as(u1, 1), double_atlas.active_index);
     try std.testing.expect(b0 != b1);
+}
+
+test "GlyphAtlas hash collision eviction preserves probe chain continuity" {
+    var atlas: GlyphAtlas = undefined;
+    GlyphAtlas.init(&atlas);
+
+    const k1 = GlyphKey{ .glyph_index = 0, .font_id = 0, .size_px = 0 };
+    const h1 = hashGlyphKey(k1) & (glyph_hash_capacity - 1);
+    var k2_opt: ?GlyphKey = null;
+
+    var g: u32 = 1;
+    while (g < 100000) : (g += 1) {
+        const cand = GlyphKey{ .glyph_index = g, .font_id = 0, .size_px = 0 };
+        if ((hashGlyphKey(cand) & (glyph_hash_capacity - 1)) == h1) {
+            k2_opt = cand;
+            break;
+        }
+    }
+    const k2 = k2_opt.?;
+
+    var dummy: [16 * 16]u8 = @splat(255);
+    atlas.beginFrame(1);
+    _ = atlas.insertGlyph(k1, &dummy, 16, 16);
+
+    atlas.beginFrame(2);
+    _ = atlas.insertGlyph(k2, &dummy, 16, 16);
+
+    _ = atlas.evictGenerational();
+
+    const slot = atlas.lookupSlot(k2);
+    try std.testing.expect(slot != null);
+}
+
+test "GlyphAtlas eviction does not overwrite pinned on-screen glyph pixels" {
+    var atlas: GlyphAtlas = undefined;
+    GlyphAtlas.init(&atlas);
+
+    var dummy1: [16 * 16]u8 = @splat(111);
+    var dummy2: [16 * 16]u8 = @splat(222);
+    var dummy3: [16 * 16]u8 = @splat(33);
+    var dummy4: [16 * 16]u8 = @splat(44);
+
+    const k1 = GlyphKey{ .glyph_index = 10, .font_id = 1, .size_px = 16 };
+    const k2 = GlyphKey{ .glyph_index = 20, .font_id = 1, .size_px = 16 };
+    const k3 = GlyphKey{ .glyph_index = 30, .font_id = 1, .size_px = 16 };
+    const k4 = GlyphKey{ .glyph_index = 40, .font_id = 1, .size_px = 16 };
+
+    atlas.beginFrame(1);
+    _ = atlas.insertGlyph(k1, &dummy1, 16, 16);
+
+    atlas.beginFrame(2);
+    const s2 = atlas.insertGlyph(k2, &dummy2, 16, 16);
+
+    const pixel_at_s2_before = atlas.pixels[s2.y_px * atlas_dimension_px + s2.x_px];
+    try std.testing.expectEqual(@as(u8, 222), pixel_at_s2_before);
+
+    _ = atlas.evictGenerational();
+
+    _ = atlas.insertGlyph(k3, &dummy3, 16, 16);
+    _ = atlas.insertGlyph(k4, &dummy4, 16, 16);
+
+    const pixel_at_s2_after = atlas.pixels[s2.y_px * atlas_dimension_px + s2.x_px];
+    try std.testing.expectEqual(@as(u8, 222), pixel_at_s2_after);
 }

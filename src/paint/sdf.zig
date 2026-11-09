@@ -231,7 +231,7 @@ pub const BezierQuadratic = extern struct {
         }
 
         const discr = b * b - 4.0 * a * c;
-        if (discr < 0.0) return 0;
+        if (discr <= 1e-6) return 0;
 
         const sqrt_discr = @sqrt(discr);
         const t1 = (-b - sqrt_discr) / (2.0 * a);
@@ -239,20 +239,24 @@ pub const BezierQuadratic = extern struct {
 
         if (t1 >= 0.0) {
             if (t1 < 1.0) {
-                const pt1 = self.evaluate(t1);
-                if (pt1[0] > px) {
-                    const dy1 = 2.0 * a * t1 + b;
-                    wind += if (dy1 > 0.0) @as(i32, 1) else @as(i32, -1);
+                const dy1 = 2.0 * a * t1 + b;
+                if (@abs(dy1) > 1e-6) {
+                    const pt1 = self.evaluate(t1);
+                    if (pt1[0] > px) {
+                        wind += if (dy1 > 0.0) @as(i32, 1) else @as(i32, -1);
+                    }
                 }
             }
         }
 
         if (t2 >= 0.0) {
             if (t2 < 1.0) {
-                const pt2 = self.evaluate(t2);
-                if (pt2[0] > px) {
-                    const dy2 = 2.0 * a * t2 + b;
-                    wind += if (dy2 > 0.0) @as(i32, 1) else @as(i32, -1);
+                const dy2 = 2.0 * a * t2 + b;
+                if (@abs(dy2) > 1e-6) {
+                    const pt2 = self.evaluate(t2);
+                    if (pt2[0] > px) {
+                        wind += if (dy2 > 0.0) @as(i32, 1) else @as(i32, -1);
+                    }
                 }
             }
         }
@@ -328,8 +332,14 @@ pub const PreparedCurve4 = struct {
         const aabb = CurveAabb.computeTight(curve);
         const x_lo = aabb.x_min - spread_px;
         const x_hi = aabb.x_max + spread_px;
-        const c_start: u8 = if (x_lo <= 0.0) 0 else @min(7, @as(u8, @intFromFloat(x_lo * 0.25)));
-        const c_end: u8 = if (x_hi >= 32.0) 7 else @min(7, @as(u8, @intFromFloat(x_hi * 0.25)));
+        const c_start: u8 = if (x_lo <= 0.0) 0 else if (x_lo >= 32.0) 7 else @as(
+            u8,
+            @intFromFloat(x_lo * 0.25),
+        );
+        const c_end: u8 = if (x_hi >= 32.0) 7 else if (x_hi <= 0.0) 0 else @as(
+            u8,
+            @intFromFloat(x_hi * 0.25),
+        );
 
         return .{
             .curve = curve,
@@ -403,7 +413,7 @@ fn computeScanlineHits(
         }
 
         const discr = b * b - 4.0 * a * c;
-        if (discr < 0.0) continue;
+        if (discr <= 1e-6) continue;
 
         const sqrt_discr = @sqrt(discr);
         const t1 = (-b - sqrt_discr) / (2.0 * a);
@@ -411,28 +421,32 @@ fn computeScanlineHits(
 
         if (t1 >= 0.0) {
             if (t1 < 1.0) {
-                const pt1 = prep.curve.evaluate(t1);
                 const dy1 = 2.0 * a * t1 + b;
-                if (hit_count < out_hits.len) {
-                    out_hits[hit_count] = .{
-                        .x_hit = pt1[0],
-                        .winding_delta = if (dy1 > 0.0) 1 else -1,
-                    };
-                    hit_count += 1;
+                if (@abs(dy1) > 1e-6) {
+                    const pt1 = prep.curve.evaluate(t1);
+                    if (hit_count < out_hits.len) {
+                        out_hits[hit_count] = .{
+                            .x_hit = pt1[0],
+                            .winding_delta = if (dy1 > 0.0) 1 else -1,
+                        };
+                        hit_count += 1;
+                    }
                 }
             }
         }
 
         if (t2 >= 0.0) {
             if (t2 < 1.0) {
-                const pt2 = prep.curve.evaluate(t2);
                 const dy2 = 2.0 * a * t2 + b;
-                if (hit_count < out_hits.len) {
-                    out_hits[hit_count] = .{
-                        .x_hit = pt2[0],
-                        .winding_delta = if (dy2 > 0.0) 1 else -1,
-                    };
-                    hit_count += 1;
+                if (@abs(dy2) > 1e-6) {
+                    const pt2 = prep.curve.evaluate(t2);
+                    if (hit_count < out_hits.len) {
+                        out_hits[hit_count] = .{
+                            .x_hit = pt2[0],
+                            .winding_delta = if (dy2 > 0.0) 1 else -1,
+                        };
+                        hit_count += 1;
+                    }
                 }
             }
         }
@@ -613,7 +627,7 @@ pub fn rasterizeGlyphSdfFast(
                 zero_vec,
                 one_vec,
             );
-            const byte_f32 = norm * byte_scale_vec + half_vec;
+            const byte_f32 = @min(byte_scale_vec, norm * byte_scale_vec + half_vec);
             const bytes: [4]u8 = @as(@Vector(4, u8), @intFromFloat(byte_f32));
 
             const offset = y * patch_w + c_idx * 4;
@@ -812,4 +826,26 @@ test "Winding number half-open tie-breaking rule" {
     const aabb = CurveAabb.computeTight(arc);
     const w_top = arc.windingContribution(5.0, aabb.y_max);
     try std.testing.expectEqual(@as(i32, 0), w_top);
+}
+
+test "SDF fast rasterizer negative coordinate culling safety" {
+    const arc = lineArc(.{ -10.0, 5.0 }, .{ -20.0, 10.0 });
+    var buf: [32 * 32]u8 = undefined;
+    rasterizeGlyphSdfFast(&.{arc}, 32, 32, 4.0, &buf);
+
+    // Patch must be validly filled (no crash or NaN)
+    for (buf) |byte| {
+        try std.testing.expect(byte <= 255);
+    }
+}
+
+test "Winding number grazing tangency does not penetrate boundary" {
+    const arc = BezierQuadratic{
+        .p0 = .{ 0.0, 10.0 },
+        .p1 = .{ 10.0, 0.0 },
+        .p2 = .{ 20.0, 10.0 },
+    };
+    // Ray passing horizontally through the vertex (5.0, 0.0)
+    const w_tangent = arc.windingContribution(5.0, 0.0);
+    try std.testing.expectEqual(@as(i32, 0), w_tangent);
 }

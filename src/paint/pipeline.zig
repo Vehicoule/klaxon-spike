@@ -344,15 +344,14 @@ pub const PaintPipeline = struct {
                 }
             };
 
-            const glyph_w = @as(f32, @floatFromInt(slot.width_px));
-            const glyph_h = @as(f32, @floatFromInt(slot.height_px));
-            const center_x = cursor_x + lsb_px + glyph_w * 0.5;
-            const center_y = baseline_y_px - glyph_h * 0.5;
+            const quad_size = font_size_px;
+            const center_x = cursor_x + lsb_px + quad_size * 0.5;
+            const center_y = baseline_y_px - quad_size * 0.5;
 
             self.emitGlyphQuad(
                 slot,
                 .{ center_x, center_y },
-                .{ glyph_w * 0.5, glyph_h * 0.5 },
+                .{ quad_size * 0.5, quad_size * 0.5 },
                 color_rgba,
             );
 

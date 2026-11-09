@@ -153,7 +153,7 @@ pub const TrueTypeFont = struct {
             const offset = readU32(data, entry_offset + 8);
             const length = readU32(data, entry_offset + 12);
 
-            if (offset + length > data.len) return error.InvalidTableOffset;
+            if (@as(u64, offset) + @as(u64, length) > data.len) return error.InvalidTableOffset;
 
             if (std.mem.eql(u8, tag, "head")) head_offset = offset;
             if (std.mem.eql(u8, tag, "maxp")) maxp_offset = offset;
@@ -298,10 +298,18 @@ pub const TrueTypeFont = struct {
             if (sub_offset + 2 > self.data.len) continue;
             const fmt = readU16(self.data, sub_offset);
 
-            if (platform_id == 0 or (platform_id == 3 and encoding_id == 1)) {
-                if (fmt == 4) subtable_format4_offset = sub_offset;
-            } else if (platform_id == 3 and encoding_id == 10) {
-                if (fmt == 12) subtable_format12_offset = sub_offset;
+            if (fmt == 12) {
+                if (platform_id == 0 or (platform_id == 3 and encoding_id == 10)) {
+                    subtable_format12_offset = sub_offset;
+                }
+            } else if (fmt == 4) {
+                const is_p0 = (platform_id == 0);
+                const is_p3 = (platform_id == 3 and (encoding_id == 1 or encoding_id == 0));
+                if (is_p0 or is_p3) {
+                    if (subtable_format4_offset == 0 or platform_id == 3) {
+                        subtable_format4_offset = sub_offset;
+                    }
+                }
             } else if (fmt == 0 and subtable_format0_offset == 0) {
                 subtable_format0_offset = sub_offset;
             }
@@ -393,10 +401,12 @@ pub const TrueTypeFont = struct {
         if (depth > 4) return;
         const offsets = self.getGlyphOffset(glyph_idx);
         if (offsets.o1 >= offsets.o2) return;
+        if (offsets.o2 > self.data.len) return;
+        if (@as(u64, self.glyf_offset) + offsets.o2 > self.data.len) return;
 
         const start = self.glyf_offset + offsets.o1;
         const end = self.glyf_offset + offsets.o2;
-        if (end > self.data.len) return;
+        if (start >= end or end > self.data.len) return;
 
         const g_data = self.data[start..end];
         if (g_data.len < 10) return;
@@ -423,6 +433,9 @@ pub const TrueTypeFont = struct {
         const num_contours = @as(usize, @intCast(num_contours_i));
         if (num_contours > scratch.end_pts.len) return;
 
+        const end_pts_header = 10 + num_contours * 2;
+        if (end_pts_header + 2 > g_data.len) return;
+
         var c: usize = 0;
         while (c < num_contours) : (c += 1) {
             scratch.end_pts[c] = readU16(g_data, 10 + c * 2);
@@ -433,6 +446,7 @@ pub const TrueTypeFont = struct {
 
         const instr_len = readU16(g_data, 10 + num_contours * 2);
         var offset = 12 + num_contours * 2 + instr_len;
+        if (offset > g_data.len) return;
 
         // 1. Decode flags with repeat compression (0x08)
         var flag_idx: usize = 0;
@@ -478,6 +492,7 @@ pub const TrueTypeFont = struct {
             scratch.points[p_idx].x = @as(f32, @floatFromInt(cur_x));
             scratch.points[p_idx].on_curve = ((flag & 0x01) != 0);
         }
+        if (p_idx < num_points) return;
 
         // 3. Decode delta-Y coordinates
         var cur_y: i32 = 0;
@@ -502,6 +517,7 @@ pub const TrueTypeFont = struct {
             cur_y += dy;
             scratch.points[p_idx].y = @as(f32, @floatFromInt(cur_y));
         }
+        if (p_idx < num_points) return;
 
         // 4. Decompose contours into straight lines and quadratic Bézier arcs
         var start_pt_idx: usize = 0;
@@ -792,4 +808,60 @@ test "TrueTypeFont real system font parsing when available" {
     font.decodeGlyphCurves(glyph_a, &scratch, &curves, &count, &stats, 0);
     try std.testing.expect(count > 0);
     try std.testing.expect(stats.lines_count > 0 or stats.quads_count > 0);
+}
+
+test "TrueTypeFont decodeGlyphCurves truncated glyph bounds safety" {
+    var font: TrueTypeFont = undefined;
+    font.num_glyphs = 1;
+    font.loc_format = 1;
+    font.loca_offset = 0;
+    font.glyf_offset = 8;
+
+    var font_data = [_]u8{
+        0x00, 0x00, 0x00, 0x00, // loca[0] = 0
+        0x00, 0x00, 0x00, 0x0A, // loca[1] = 10
+        0x00, 0x01, // num_contours = 1
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bbox (8 bytes)
+    };
+    font.data = &font_data;
+
+    var scratch = ScratchBuffers{};
+    var curves: [16]BezierQuadratic = undefined;
+    var count: usize = 0;
+    var stats = GlyphStats{};
+
+    font.decodeGlyphCurves(0, &scratch, &curves, &count, &stats, 0);
+    try std.testing.expectEqual(@as(usize, 0), count);
+}
+
+test "TrueTypeFont cmap Format 12 subtable Unicode platform mapping" {
+    // 16-byte dummy prefix so cmap starts at offset 16
+    var cmap_data = [_]u8{
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        // cmap header at offset 16:
+        0x00, 0x00, // version = 0
+        0x00, 0x01, // num_tables = 1
+        // Encoding record: platform_id=0 (Unicode), encoding_id=4, offset=12
+        0x00, 0x00,
+        0x00, 0x04,
+        0x00, 0x00,
+        0x00, 0x0C,
+        // Format 12 Subtable at sub_offset = 16 + 12 = 28:
+        0x00, 0x0C, // format = 12
+        0x00, 0x00, // reserved
+        0x00, 0x00, 0x00, 0x1C, // length = 28
+        0x00, 0x00, 0x00, 0x00, // language = 0
+        0x00, 0x00, 0x00, 0x01, // num_groups = 1
+        // Group 0: start_char = 0x1F600, end_char = 0x1F600, start_glyph = 42
+        0x00, 0x01, 0xF6, 0x00,
+        0x00, 0x01, 0xF6, 0x00,
+        0x00, 0x00, 0x00, 0x2A,
+    };
+
+    var font: TrueTypeFont = undefined;
+    font.data = &cmap_data;
+    font.cmap_offset = 16;
+
+    const gid = font.glyphIndexForCodepoint(0x1F600);
+    try std.testing.expectEqual(@as(u16, 42), gid);
 }
