@@ -41,9 +41,13 @@ pub fn isCoreLayoutPaint(path: []const u8) bool {
     if (std.mem.startsWith(u8, path, "paint/") or std.mem.startsWith(u8, path, "src/paint/")) {
         return true;
     }
+    if (std.mem.startsWith(u8, path, "gpu/") or std.mem.startsWith(u8, path, "src/gpu/")) {
+        return true;
+    }
     if (std.mem.indexOf(u8, path, "/core/") != null) return true;
     if (std.mem.indexOf(u8, path, "/layout/") != null) return true;
     if (std.mem.indexOf(u8, path, "/paint/") != null) return true;
+    if (std.mem.indexOf(u8, path, "/gpu/") != null) return true;
     return false;
 }
 
@@ -306,6 +310,8 @@ test "isCoreLayoutPaint path matching" {
     try std.testing.expect(isCoreLayoutPaint("src/layout/box.zig"));
     try std.testing.expect(isCoreLayoutPaint("paint/atlas.zig"));
     try std.testing.expect(isCoreLayoutPaint("src/paint/atlas.zig"));
+    try std.testing.expect(isCoreLayoutPaint("gpu/hal.zig"));
+    try std.testing.expect(isCoreLayoutPaint("src/gpu/hal.zig"));
     try std.testing.expect(!isCoreLayoutPaint("spikes/paint_pipeline.zig"));
     try std.testing.expect(!isCoreLayoutPaint("spikes/engine_m0.zig"));
     try std.testing.expect(!isCoreLayoutPaint("tools/lint.zig"));

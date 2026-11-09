@@ -17,6 +17,7 @@ pub const mock = @import("mock.zig");
 pub const MockBackend = mock.MockBackend;
 pub const MockWindow = mock.MockWindow;
 pub const Vertex2D = mock.Vertex2D;
+pub const makeQuadVertices = mock.makeQuadVertices;
 
 // ============================================================================
 // 1. Resource Handle Primitives (Generational Identifiers)
@@ -556,6 +557,53 @@ pub fn validateBackend(comptime Backend: type) void {
                 @compileError("Backend missing required 19-function HAL entry: " ++ fn_name);
             }
         }
+
+        // Statically verify signatures of all 19 pinned functions
+        _ = struct {
+            fn verifySignatures() void {
+                const dev: *Backend.Device = undefined;
+                const q: *Backend.Queue = undefined;
+                const b_desc: BufferDesc = undefined;
+                const b: Backend.Buffer = undefined;
+                const t_desc: TextureDesc = undefined;
+                const t: Backend.Texture = undefined;
+                const s_desc: SamplerDesc = undefined;
+                const sm_desc: ShaderModuleDesc = undefined;
+                const rp_desc: RenderPipelineDesc = undefined;
+                const rp: Backend.RenderPipeline = undefined;
+                const enc: *Backend.CommandEncoder = undefined;
+                const pass: *Backend.RenderPassEncoder = undefined;
+                const cbs: []const Backend.CommandBuffer = undefined;
+                const layout: TextureDataLayout = undefined;
+                const extent: Extent3D = undefined;
+                const rect: RectU32 = undefined;
+                const bytes_const: []const u8 = undefined;
+                const bytes_mut: []u8 = undefined;
+
+                _ = @as(anyerror!Backend.Buffer, Backend.createBuffer(dev, b_desc));
+                Backend.destroyBuffer(dev, b);
+                Backend.writeBuffer(q, b, 0, bytes_const);
+                _ = @as(anyerror!Backend.Texture, Backend.createTexture(dev, t_desc));
+                Backend.destroyTexture(dev, t);
+                Backend.writeTexture(q, t, layout, extent, bytes_const);
+                _ = @as(anyerror!Backend.Sampler, Backend.createSampler(dev, s_desc));
+                _ = @as(anyerror!Backend.ShaderModule, Backend.createShaderModule(dev, sm_desc));
+                _ = @as(
+                    anyerror!Backend.RenderPipeline,
+                    Backend.createRenderPipeline(dev, rp_desc),
+                );
+                _ = @as(anyerror!Backend.CommandEncoder, Backend.createCommandEncoder(dev));
+                _ = @as(anyerror!Backend.RenderPassEncoder, Backend.beginRenderPass(enc, .{}));
+                Backend.setPipeline(pass, rp);
+                Backend.setVertexBuffer(pass, 0, b, 0);
+                Backend.setClipRect(pass, rect);
+                Backend.draw(pass, 0, 0, 0, 0);
+                Backend.endRenderPass(pass);
+                _ = @as(anyerror!Backend.CommandBuffer, Backend.finishCommandEncoder(enc));
+                Backend.submit(q, cbs);
+                _ = @as(anyerror!void, Backend.readbackTarget(dev, t, bytes_mut));
+            }
+        }.verifySignatures;
     }
 }
 
@@ -581,14 +629,11 @@ pub fn Engine(comptime GpuBackend: type, comptime Window: type) type {
         pub fn init(
             target: *Self,
             device: GpuBackend.Device,
-            queue: GpuBackend.Queue,
             window: Window,
         ) void {
-            target.* = .{
-                .device = device,
-                .queue = queue,
-                .window = window,
-            };
+            target.device = device;
+            target.queue = GpuBackend.Queue.init(&target.device);
+            target.window = window;
         }
 
         pub inline fn createBuffer(self: *Self, desc: BufferDesc) !GpuBackend.Buffer {
@@ -775,12 +820,11 @@ test "HAL: Comptime backend validation on MockBackend" {
 test "HAL: Engine instantiation with zero-cost comptime dispatch" {
     var device: MockBackend.Device = undefined;
     MockBackend.Device.init(&device);
-    const queue = MockBackend.Queue.init(&device);
     const window = MockWindow{ .width_px = 640, .height_px = 480 };
 
     const MockEngine = Engine(MockBackend, MockWindow);
     var engine: MockEngine = undefined;
-    MockEngine.init(&engine, device, queue, window);
+    MockEngine.init(&engine, device, window);
 
     const buf_desc = BufferDesc{
         .size = 256,
@@ -792,5 +836,116 @@ test "HAL: Engine instantiation with zero-cost comptime dispatch" {
     const test_bytes = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
     engine.writeBuffer(buffer, 0, &test_bytes);
 
+    // Verify bytes were actually written to engine.device
+    const data = engine.device.getBufferData(buffer).?;
+    try std.testing.expectEqualSlices(u8, &test_bytes, data[0..8]);
+
     engine.destroyBuffer(buffer);
+}
+
+test "HAL: All 19 functions fully operational through Engine comptime dispatch" {
+    var device: MockBackend.Device = undefined;
+    MockBackend.Device.init(&device);
+    const window = MockWindow{ .width_px = 32, .height_px = 32 };
+
+    const MockEngine = Engine(MockBackend, MockWindow);
+    var engine: MockEngine = undefined;
+    MockEngine.init(&engine, device, window);
+
+    // 1. createBuffer
+    const buf = try engine.createBuffer(.{
+        .size = 128,
+        .usage = BufferUsage.vertex_dst,
+    });
+    try std.testing.expect(buf.isValid());
+
+    // 2. writeBuffer
+    const quad_verts = makeQuadVertices(2.0, 2.0, 8.0, 8.0, .{ 255, 0, 0, 255 });
+    engine.writeBuffer(buf, 0, std.mem.sliceAsBytes(&quad_verts));
+
+    // 3. createTexture
+    const tex = try engine.createTexture(.{
+        .size = .{ .width = 16, .height = 16 },
+        .format = .rgba8_unorm,
+    });
+    try std.testing.expect(tex.isValid());
+
+    // 4. writeTexture
+    var initial_pixels: [16 * 16 * 4]u8 = @splat(0);
+    engine.writeTexture(tex, .{ .bytes_per_row = 64 }, .{
+        .width = 16,
+        .height = 16,
+    }, &initial_pixels);
+
+    // 5. createSampler
+    const sampler = try engine.createSampler(SamplerDesc.pinned_bilinear_clamp);
+    try std.testing.expect(sampler.isValid());
+
+    // 6. createShaderModule
+    const vs = try engine.createShaderModule(.{ .code = "vertex_main" });
+    try std.testing.expect(vs.isValid());
+
+    // 7. createRenderPipeline
+    const pipeline = try engine.createRenderPipeline(.{
+        .vertex_shader = vs,
+        .color_target_format = .rgba8_unorm,
+    });
+    try std.testing.expect(pipeline.isValid());
+
+    // 8. createCommandEncoder
+    var encoder = try engine.createCommandEncoder();
+
+    // 9. beginRenderPass
+    var pass = try engine.beginRenderPass(&encoder, .{
+        .color_attachment = .{
+            .target = tex,
+            .load_op = .clear,
+            .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
+        },
+    });
+
+    // 10. setPipeline
+    engine.setPipeline(&pass, pipeline);
+
+    // 11. setVertexBuffer
+    engine.setVertexBuffer(&pass, 0, buf, 0);
+
+    // 12. setClipRect
+    engine.setClipRect(&pass, .{ .x = 0, .y = 0, .width = 16, .height = 16 });
+
+    // 13. draw
+    engine.draw(&pass, 6, 1, 0, 0);
+
+    // 14. endRenderPass
+    engine.endRenderPass(&pass);
+
+    // 15. finishCommandEncoder
+    const cmd_buf = try engine.finishCommandEncoder(&encoder);
+    try std.testing.expect(cmd_buf.isValid());
+
+    // 16. submit
+    engine.submit(&[_]MockBackend.CommandBuffer{cmd_buf});
+
+    // 17. readbackTarget
+    var readback: [16 * 16 * 4]u8 = undefined;
+    try engine.readbackTarget(tex, &readback);
+
+    // Pixel at (4, 4) should be red {255, 0, 0, 255}
+    const idx = (4 * 16 + 4) * 4;
+    try std.testing.expectEqual(@as(u8, 255), readback[idx + 0]);
+    try std.testing.expectEqual(@as(u8, 0), readback[idx + 1]);
+    try std.testing.expectEqual(@as(u8, 0), readback[idx + 2]);
+    try std.testing.expectEqual(@as(u8, 255), readback[idx + 3]);
+
+    // 18. destroyBuffer
+    engine.destroyBuffer(buf);
+
+    // 19. destroyTexture
+    engine.destroyTexture(tex);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(mock);
+    _ = mock;
 }
