@@ -577,9 +577,12 @@ pub fn validateBackend(comptime Backend: type) void {
                 const layout: TextureDataLayout = undefined;
                 const extent: Extent3D = undefined;
                 const rect: RectU32 = undefined;
+                const rpass_desc: RenderPassDesc = undefined;
                 const bytes_const: []const u8 = undefined;
                 const bytes_mut: []u8 = undefined;
 
+                Backend.Device.init(dev);
+                _ = @as(Backend.Queue, Backend.Queue.init(dev));
                 _ = @as(anyerror!Backend.Buffer, Backend.createBuffer(dev, b_desc));
                 Backend.destroyBuffer(dev, b);
                 Backend.writeBuffer(q, b, 0, bytes_const);
@@ -593,7 +596,10 @@ pub fn validateBackend(comptime Backend: type) void {
                     Backend.createRenderPipeline(dev, rp_desc),
                 );
                 _ = @as(anyerror!Backend.CommandEncoder, Backend.createCommandEncoder(dev));
-                _ = @as(anyerror!Backend.RenderPassEncoder, Backend.beginRenderPass(enc, .{}));
+                _ = @as(
+                    anyerror!Backend.RenderPassEncoder,
+                    Backend.beginRenderPass(enc, rpass_desc),
+                );
                 Backend.setPipeline(pass, rp);
                 Backend.setVertexBuffer(pass, 0, b, 0);
                 Backend.setClipRect(pass, rect);

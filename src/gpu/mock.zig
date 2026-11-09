@@ -218,8 +218,11 @@ pub const MockBackend = struct {
         command_count: u32 = 0,
         commands: [commands_per_buffer_max]Command = undefined,
         has_overflowed: bool = false,
+        in_render_pass: bool = false,
+        is_finished: bool = false,
 
         pub fn record(self: *CommandEncoder, cmd: Command) !void {
+            if (self.is_finished) return hal.GpuError.InvalidCommandSequence;
             if (self.command_count >= commands_per_buffer_max) {
                 self.has_overflowed = true;
                 return hal.GpuError.PoolExhausted;
@@ -366,14 +369,20 @@ pub const MockBackend = struct {
 
         var y: u32 = 0;
         while (y < size.height) : (y += 1) {
-            const src_offset_u64 = layout.offset + @as(u64, y) * layout.bytes_per_row;
-            const dest_offset_u64 = @as(u64, y) * tex_desc.size.width * bpp;
+            const row_src_off = std.math.mul(u64, y, layout.bytes_per_row) catch continue;
+            const src_offset_u64 = std.math.add(u64, layout.offset, row_src_off) catch continue;
+            const src_end_u64 = std.math.add(u64, src_offset_u64, copy_row_bytes) catch continue;
 
-            if (src_offset_u64 + copy_row_bytes <= data.len and
-                dest_offset_u64 + copy_row_bytes <= dest_slice.len)
-            {
+            const row_dest_off = std.math.mul(
+                u64,
+                y,
+                @as(u64, tex_desc.size.width) * bpp,
+            ) catch continue;
+            const dest_end_u64 = std.math.add(u64, row_dest_off, copy_row_bytes) catch continue;
+
+            if (src_end_u64 <= data.len and dest_end_u64 <= dest_slice.len) {
                 const src_start: usize = @intCast(src_offset_u64);
-                const dest_start: usize = @intCast(dest_offset_u64);
+                const dest_start: usize = @intCast(row_dest_off);
                 @memcpy(
                     dest_slice[dest_start .. dest_start + copy_row_bytes],
                     data[src_start .. src_start + copy_row_bytes],
@@ -390,11 +399,13 @@ pub const MockBackend = struct {
         assert(desc.min_filter == .linear);
         assert(desc.address_mode_u == .clamp_to_edge);
         assert(desc.address_mode_v == .clamp_to_edge);
+        assert(desc.address_mode_w == .clamp_to_edge);
         if (desc.mipmap_filter != .none or
             desc.mag_filter != .linear or
             desc.min_filter != .linear or
             desc.address_mode_u != .clamp_to_edge or
-            desc.address_mode_v != .clamp_to_edge)
+            desc.address_mode_v != .clamp_to_edge or
+            desc.address_mode_w != .clamp_to_edge)
         {
             return hal.GpuError.InvalidDesc;
         }
@@ -446,14 +457,16 @@ pub const MockBackend = struct {
         if (desc.vertex_shader.id == 0 or desc.vertex_shader.id > shader_pool_capacity) {
             return hal.GpuError.InvalidHandle;
         }
-        if (!device.shaders[desc.vertex_shader.id - 1].active) {
+        const vs_slot = &device.shaders[desc.vertex_shader.id - 1];
+        if (!vs_slot.active or vs_slot.generation != desc.vertex_shader.generation) {
             return hal.GpuError.InvalidHandle;
         }
         if (desc.fragment_shader) |fs| {
             if (fs.id == 0 or fs.id > shader_pool_capacity) {
                 return hal.GpuError.InvalidHandle;
             }
-            if (!device.shaders[fs.id - 1].active) {
+            const fs_slot = &device.shaders[fs.id - 1];
+            if (!fs_slot.active or fs_slot.generation != fs.generation) {
                 return hal.GpuError.InvalidHandle;
             }
         }
@@ -489,7 +502,20 @@ pub const MockBackend = struct {
         desc: hal.RenderPassDesc,
     ) !RenderPassEncoder {
         assert(desc.color_attachment.target.isValid());
+        if (encoder.is_finished or encoder.in_render_pass) {
+            return hal.GpuError.InvalidCommandSequence;
+        }
+        const target = desc.color_attachment.target;
+        if (target.id == 0 or target.id > texture_pool_capacity) {
+            return hal.GpuError.InvalidHandle;
+        }
+        const slot = &encoder.device.textures[target.id - 1];
+        if (!slot.active or slot.generation != target.generation) {
+            return hal.GpuError.InvalidHandle;
+        }
+
         try encoder.record(.{ .begin_render_pass = desc });
+        encoder.in_render_pass = true;
         return RenderPassEncoder{
             .encoder = encoder,
             .pass_desc = desc,
@@ -557,14 +583,20 @@ pub const MockBackend = struct {
         assert(!pass.is_ended);
         if (pass.is_ended) return;
         pass.is_ended = true;
+        pass.encoder.in_render_pass = false;
         pass.encoder.record(.{ .end_render_pass = {} }) catch return;
     }
 
     /// 17. Finalizes command recording and returns an executable CommandBuffer.
     pub fn finishCommandEncoder(encoder: *CommandEncoder) !hal.CommandBuffer {
+        if (encoder.is_finished or encoder.in_render_pass) {
+            return hal.GpuError.InvalidCommandSequence;
+        }
         if (encoder.has_overflowed) {
             return hal.GpuError.PoolExhausted;
         }
+        encoder.is_finished = true;
+
         var i: u32 = 0;
         while (i < command_buffer_capacity) : (i += 1) {
             if (!encoder.device.command_buffers[i].active) {
@@ -625,10 +657,25 @@ pub const MockBackend = struct {
         const dst_r: u32 = dst[0];
         const dst_g: u32 = dst[1];
         const dst_b: u32 = dst[2];
-        dst[0] = @intCast((@as(u32, src_r) * a + dst_r * inv_a) / 255);
-        dst[1] = @intCast((@as(u32, src_g) * a + dst_g * inv_a) / 255);
-        dst[2] = @intCast((@as(u32, src_b) * a + dst_b * inv_a) / 255);
-        dst[3] = 255;
+        const dst_a: u32 = dst[3];
+
+        const out_a: u32 = a + (dst_a * inv_a + 127) / 255;
+        if (out_a == 0) return;
+
+        if (dst_a == 255) {
+            dst[0] = @intCast((@as(u32, src_r) * a + dst_r * inv_a) / 255);
+            dst[1] = @intCast((@as(u32, src_g) * a + dst_g * inv_a) / 255);
+            dst[2] = @intCast((@as(u32, src_b) * a + dst_b * inv_a) / 255);
+            dst[3] = 255;
+        } else {
+            const r_num = @as(u32, src_r) * a + (dst_r * dst_a * inv_a) / 255;
+            const g_num = @as(u32, src_g) * a + (dst_g * dst_a * inv_a) / 255;
+            const b_num = @as(u32, src_b) * a + (dst_b * dst_a * inv_a) / 255;
+            dst[0] = @intCast(@min(255, (r_num + out_a / 2) / out_a));
+            dst[1] = @intCast(@min(255, (g_num + out_a / 2) / out_a));
+            dst[2] = @intCast(@min(255, (b_num + out_a / 2) / out_a));
+            dst[3] = @intCast(@min(255, out_a));
+        }
     }
 
     fn blendPixelBgra(dst: []u8, src_r: u8, src_g: u8, src_b: u8, alpha: u8) void {
@@ -637,10 +684,25 @@ pub const MockBackend = struct {
         const dst_b: u32 = dst[0];
         const dst_g: u32 = dst[1];
         const dst_r: u32 = dst[2];
-        dst[0] = @intCast((@as(u32, src_b) * a + dst_b * inv_a) / 255);
-        dst[1] = @intCast((@as(u32, src_g) * a + dst_g * inv_a) / 255);
-        dst[2] = @intCast((@as(u32, src_r) * a + dst_r * inv_a) / 255);
-        dst[3] = 255;
+        const dst_a: u32 = dst[3];
+
+        const out_a: u32 = a + (dst_a * inv_a + 127) / 255;
+        if (out_a == 0) return;
+
+        if (dst_a == 255) {
+            dst[0] = @intCast((@as(u32, src_b) * a + dst_b * inv_a) / 255);
+            dst[1] = @intCast((@as(u32, src_g) * a + dst_g * inv_a) / 255);
+            dst[2] = @intCast((@as(u32, src_r) * a + dst_r * inv_a) / 255);
+            dst[3] = 255;
+        } else {
+            const b_num = @as(u32, src_b) * a + (dst_b * dst_a * inv_a) / 255;
+            const g_num = @as(u32, src_g) * a + (dst_g * dst_a * inv_a) / 255;
+            const r_num = @as(u32, src_r) * a + (dst_r * dst_a * inv_a) / 255;
+            dst[0] = @intCast(@min(255, (b_num + out_a / 2) / out_a));
+            dst[1] = @intCast(@min(255, (g_num + out_a / 2) / out_a));
+            dst[2] = @intCast(@min(255, (r_num + out_a / 2) / out_a));
+            dst[3] = @intCast(@min(255, out_a));
+        }
     }
 
     fn executeCommandBuffer(device: *Device, rec: *const CommandBufferRecord) void {
@@ -727,22 +789,25 @@ pub const MockBackend = struct {
                     const target_pixels = device.getTextureData(target) orelse continue;
                     const t_desc = device.textures[target.id - 1].desc;
 
-                    rasterizeGeometry(
-                        t_desc.size.width,
-                        t_desc.size.height,
-                        t_desc.format,
-                        target_pixels,
-                        active_clip orelse hal.RectU32{
-                            .x = 0,
-                            .y = 0,
-                            .width = t_desc.size.width,
-                            .height = t_desc.size.height,
-                        },
-                        buf_bytes,
-                        bound_offset,
-                        args.vertex_count,
-                        args.first_vertex,
-                    );
+                    var inst_i: u32 = 0;
+                    while (inst_i < args.instance_count) : (inst_i += 1) {
+                        rasterizeGeometry(
+                            t_desc.size.width,
+                            t_desc.size.height,
+                            t_desc.format,
+                            target_pixels,
+                            active_clip orelse hal.RectU32{
+                                .x = 0,
+                                .y = 0,
+                                .width = t_desc.size.width,
+                                .height = t_desc.size.height,
+                            },
+                            buf_bytes,
+                            bound_offset,
+                            args.vertex_count,
+                            args.first_vertex,
+                        );
+                    }
                 },
                 .end_render_pass => {
                     current_target = null;
@@ -768,10 +833,15 @@ pub const MockBackend = struct {
         if (safe_clip.isEmpty()) return;
         const v_size: usize = @sizeOf(Vertex2D);
         if (byte_offset > vertex_bytes.len) return;
-        const start_offset: usize = @as(usize, @intCast(byte_offset)) +
-            @as(usize, first_vertex) * v_size;
-        const required_bytes: usize = @as(usize, vertex_count) * v_size;
-        if (start_offset + required_bytes > vertex_bytes.len) return;
+        const first_v_bytes = std.math.mul(usize, first_vertex, v_size) catch return;
+        const start_offset = std.math.add(
+            usize,
+            @as(usize, @intCast(byte_offset)),
+            first_v_bytes,
+        ) catch return;
+        const required_bytes = std.math.mul(usize, vertex_count, v_size) catch return;
+        const total_needed = std.math.add(usize, start_offset, required_bytes) catch return;
+        if (total_needed > vertex_bytes.len) return;
 
         const vertices_raw = vertex_bytes[start_offset .. start_offset + required_bytes];
         const triangle_count = vertex_count / 3;
@@ -813,10 +883,10 @@ pub const MockBackend = struct {
         assert(width_px > 0);
         assert(height_px > 0);
 
-        // Guard against NaN coordinates
-        if (std.math.isNan(v0.pos[0]) or std.math.isNan(v0.pos[1]) or
-            std.math.isNan(v1.pos[0]) or std.math.isNan(v1.pos[1]) or
-            std.math.isNan(v2.pos[0]) or std.math.isNan(v2.pos[1]))
+        // Guard against NaN and infinite coordinates
+        if (!std.math.isFinite(v0.pos[0]) or !std.math.isFinite(v0.pos[1]) or
+            !std.math.isFinite(v1.pos[0]) or !std.math.isFinite(v1.pos[1]) or
+            !std.math.isFinite(v2.pos[0]) or !std.math.isFinite(v2.pos[1]))
         {
             return;
         }
@@ -856,6 +926,30 @@ pub const MockBackend = struct {
         if (start_x >= end_x or start_y >= end_y) return;
 
         const inv_det = 1.0 / det;
+        const is_ccw = (det > 0.0);
+
+        // Top-left rule edge classification for seamless shared boundary rendering
+        const dx0 = v1.pos[0] - v0.pos[0];
+        const dy0 = v1.pos[1] - v0.pos[1];
+        const dx1 = v2.pos[0] - v1.pos[0];
+        const dy1 = v2.pos[1] - v1.pos[1];
+        const dx2 = v0.pos[0] - v2.pos[0];
+        const dy2 = v0.pos[1] - v2.pos[1];
+
+        const tl0 = if (is_ccw)
+            (dy0 > 0.0 or (dy0 == 0.0 and dx0 < 0.0))
+        else
+            (dy0 < 0.0 or (dy0 == 0.0 and dx0 > 0.0));
+
+        const tl1 = if (is_ccw)
+            (dy1 > 0.0 or (dy1 == 0.0 and dx1 < 0.0))
+        else
+            (dy1 < 0.0 or (dy1 == 0.0 and dx1 > 0.0));
+
+        const tl2 = if (is_ccw)
+            (dy2 > 0.0 or (dy2 == 0.0 and dx2 < 0.0))
+        else
+            (dy2 < 0.0 or (dy2 == 0.0 and dx2 > 0.0));
 
         var y = start_y;
         while (y < end_y) : (y += 1) {
@@ -871,10 +965,22 @@ pub const MockBackend = struct {
                 const e2 = (v0.pos[0] - v2.pos[0]) * (py - v2.pos[1]) -
                     (v0.pos[1] - v2.pos[1]) * (px - v2.pos[0]);
 
-                const inside = if (det > 0.0)
-                    (e0 >= 0.0 and e1 >= 0.0 and e2 >= 0.0)
+                const in0 = if (is_ccw)
+                    (if (tl0) e0 >= 0.0 else e0 > 0.0)
                 else
-                    (e0 <= 0.0 and e1 <= 0.0 and e2 <= 0.0);
+                    (if (tl0) e0 <= 0.0 else e0 < 0.0);
+
+                const in1 = if (is_ccw)
+                    (if (tl1) e1 >= 0.0 else e1 > 0.0)
+                else
+                    (if (tl1) e1 <= 0.0 else e1 < 0.0);
+
+                const in2 = if (is_ccw)
+                    (if (tl2) e2 >= 0.0 else e2 > 0.0)
+                else
+                    (if (tl2) e2 <= 0.0 else e2 < 0.0);
+
+                const inside = in0 and in1 and in2;
 
                 if (inside) {
                     const w0 = e1 * inv_det;
@@ -894,10 +1000,10 @@ pub const MockBackend = struct {
                         w1 * @as(f32, @floatFromInt(v1.color[3])) +
                         w2 * @as(f32, @floatFromInt(v2.color[3]));
 
-                    const cur_r: u8 = @intFromFloat(std.math.clamp(r_f, 0.0, 255.0));
-                    const cur_g: u8 = @intFromFloat(std.math.clamp(g_f, 0.0, 255.0));
-                    const cur_b: u8 = @intFromFloat(std.math.clamp(b_f, 0.0, 255.0));
-                    const alpha: u8 = @intFromFloat(std.math.clamp(a_f, 0.0, 255.0));
+                    const cur_r: u8 = @intFromFloat(@round(std.math.clamp(r_f, 0.0, 255.0)));
+                    const cur_g: u8 = @intFromFloat(@round(std.math.clamp(g_f, 0.0, 255.0)));
+                    const cur_b: u8 = @intFromFloat(@round(std.math.clamp(b_f, 0.0, 255.0)));
+                    const alpha: u8 = @intFromFloat(@round(std.math.clamp(a_f, 0.0, 255.0)));
 
                     switch (format) {
                         .rgba8_unorm => {
@@ -1132,6 +1238,81 @@ test "MockBackend: Quad draw recording, scissor clipping, and golden oracle read
     try std.testing.expectEqual(@as(u8, 0), readback_pixels[outside_idx + 1]);
     try std.testing.expectEqual(@as(u8, 0), readback_pixels[outside_idx + 2]);
     try std.testing.expectEqual(@as(u8, 255), readback_pixels[outside_idx + 3]);
+}
+
+test "MockBackend: Translucent quad has uniform pixel blending without diagonal seam" {
+    var device: MockBackend.Device = undefined;
+    MockBackend.Device.init(&device);
+    var queue = MockBackend.Queue.init(&device);
+
+    const width_px: u32 = 10;
+    const height_px: u32 = 10;
+    const target = try MockBackend.createTexture(&device, .{
+        .size = .{ .width = width_px, .height = height_px },
+        .format = .rgba8_unorm,
+    });
+    defer MockBackend.destroyTexture(&device, target);
+
+    // 10x10 quad from (0,0) with red color and alpha 128
+    const quad_verts = makeQuadVertices(0.0, 0.0, 10.0, 10.0, .{ 200, 0, 0, 128 });
+    const vbuf = try MockBackend.createBuffer(&device, .{
+        .size = @sizeOf(@TypeOf(quad_verts)),
+        .usage = hal.BufferUsage.vertex_dst,
+    });
+    defer MockBackend.destroyBuffer(&device, vbuf);
+    MockBackend.writeBuffer(&queue, vbuf, 0, std.mem.sliceAsBytes(&quad_verts));
+
+    const vs = try MockBackend.createShaderModule(&device, .{ .code = "vs" });
+    const pipeline = try MockBackend.createRenderPipeline(&device, .{ .vertex_shader = vs });
+
+    var encoder = try MockBackend.createCommandEncoder(&device);
+    var pass = try MockBackend.beginRenderPass(&encoder, .{
+        .color_attachment = .{
+            .target = target,
+            .load_op = .clear,
+            .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
+        },
+    });
+    MockBackend.setPipeline(&pass, pipeline);
+    MockBackend.setVertexBuffer(&pass, 0, vbuf, 0);
+    MockBackend.draw(&pass, 6, 1, 0, 0);
+    MockBackend.endRenderPass(&pass);
+
+    const cb = try MockBackend.finishCommandEncoder(&encoder);
+    MockBackend.submit(&queue, &[_]hal.CommandBuffer{cb});
+
+    var readback: [width_px * height_px * 4]u8 = undefined;
+    try MockBackend.readbackTarget(&device, target, &readback);
+
+    // Non-diagonal pixel (1, 0): expected red channel value
+    const off_diag_idx = (0 * width_px + 1) * 4;
+    const expected_r = readback[off_diag_idx + 0];
+
+    // Diagonal pixel (0, 0) and (2, 2) on the shared edge between the 2 triangles
+    const diag_idx_0 = (0 * width_px + 0) * 4;
+    const diag_idx_2 = (2 * width_px + 2) * 4;
+
+    try std.testing.expectEqual(expected_r, readback[diag_idx_0 + 0]);
+    try std.testing.expectEqual(expected_r, readback[diag_idx_2 + 0]);
+}
+
+test "MockBackend: Stale shader generation rejected by createRenderPipeline" {
+    var device: MockBackend.Device = undefined;
+    MockBackend.Device.init(&device);
+
+    const s1 = try MockBackend.createShaderModule(&device, .{ .code = "v1" });
+    device.shaders[s1.id - 1].active = false;
+    device.shaders[s1.id - 1].generation += 1;
+
+    const s2 = try MockBackend.createShaderModule(&device, .{ .code = "v2" });
+    try std.testing.expectEqual(s1.id, s2.id);
+    try std.testing.expect(s1.generation != s2.generation);
+
+    // Passing stale handle s1 to createRenderPipeline must fail with InvalidHandle
+    try std.testing.expectError(
+        hal.GpuError.InvalidHandle,
+        MockBackend.createRenderPipeline(&device, .{ .vertex_shader = s1 }),
+    );
 }
 
 test "MockBackend: All 19 contract functions exercised end-to-end" {
@@ -1452,4 +1633,192 @@ test "MockBackend: Smooth barycentric vertex color interpolation" {
     // Near red vertex (1, 1): red channel should dominate
     const p1_idx = (1 * 16 + 1) * 4;
     try std.testing.expect(readback[p1_idx + 0] > 180);
+}
+
+test "MockBackend: CommandEncoder enforces proper render pass sequence" {
+    var device: MockBackend.Device = undefined;
+    MockBackend.Device.init(&device);
+
+    const tex = try MockBackend.createTexture(&device, .{
+        .size = .{ .width = 4, .height = 4 },
+        .format = .rgba8_unorm,
+    });
+    defer MockBackend.destroyTexture(&device, tex);
+
+    var encoder = try MockBackend.createCommandEncoder(&device);
+    var pass = try MockBackend.beginRenderPass(&encoder, .{
+        .color_attachment = .{ .target = tex },
+    });
+
+    // Finishing an encoder with an open render pass must fail
+    try std.testing.expectError(
+        hal.GpuError.InvalidCommandSequence,
+        MockBackend.finishCommandEncoder(&encoder),
+    );
+
+    // Opening a nested render pass on the same encoder must fail
+    try std.testing.expectError(
+        hal.GpuError.InvalidCommandSequence,
+        MockBackend.beginRenderPass(&encoder, .{
+            .color_attachment = .{ .target = tex },
+        }),
+    );
+
+    MockBackend.endRenderPass(&pass);
+
+    // Now finishing succeeds
+    const cb = try MockBackend.finishCommandEncoder(&encoder);
+    try std.testing.expect(cb.isValid());
+
+    // Finishing an already-finished encoder must fail
+    try std.testing.expectError(
+        hal.GpuError.InvalidCommandSequence,
+        MockBackend.finishCommandEncoder(&encoder),
+    );
+}
+
+test "MockBackend: Translucent rendering preserves and composites destination alpha" {
+    var device: MockBackend.Device = undefined;
+    MockBackend.Device.init(&device);
+    var queue = MockBackend.Queue.init(&device);
+
+    const width_px: u32 = 4;
+    const height_px: u32 = 4;
+    const target = try MockBackend.createTexture(&device, .{
+        .size = .{ .width = width_px, .height = height_px },
+        .format = .rgba8_unorm,
+    });
+    defer MockBackend.destroyTexture(&device, target);
+
+    const quad_verts = makeQuadVertices(0.0, 0.0, 4.0, 4.0, .{ 200, 50, 0, 100 });
+    const vbuf = try MockBackend.createBuffer(&device, .{
+        .size = @sizeOf(@TypeOf(quad_verts)),
+        .usage = hal.BufferUsage.vertex_dst,
+    });
+    defer MockBackend.destroyBuffer(&device, vbuf);
+    MockBackend.writeBuffer(&queue, vbuf, 0, std.mem.sliceAsBytes(&quad_verts));
+
+    const vs = try MockBackend.createShaderModule(&device, .{ .code = "vs" });
+    const pipeline = try MockBackend.createRenderPipeline(&device, .{ .vertex_shader = vs });
+
+    var encoder = try MockBackend.createCommandEncoder(&device);
+    var pass = try MockBackend.beginRenderPass(&encoder, .{
+        .color_attachment = .{
+            .target = target,
+            .load_op = .clear,
+            .clear_color = .{ 0.0, 0.0, 0.0, 0.0 },
+        },
+    });
+    MockBackend.setPipeline(&pass, pipeline);
+    MockBackend.setVertexBuffer(&pass, 0, vbuf, 0);
+    MockBackend.draw(&pass, 6, 1, 0, 0);
+    MockBackend.endRenderPass(&pass);
+
+    const cb = try MockBackend.finishCommandEncoder(&encoder);
+    MockBackend.submit(&queue, &[_]hal.CommandBuffer{cb});
+
+    var readback: [4 * 4 * 4]u8 = undefined;
+    try MockBackend.readbackTarget(&device, target, &readback);
+
+    // Alpha at (2, 2) must be 100 (composited over alpha 0), not forced to 255
+    const idx = (2 * width_px + 2) * 4;
+    try std.testing.expectEqual(@as(u8, 100), readback[idx + 3]);
+}
+
+test "MockBackend: Infinite vertex coordinates safely rejected without rasterization" {
+    var device: MockBackend.Device = undefined;
+    MockBackend.Device.init(&device);
+    var queue = MockBackend.Queue.init(&device);
+
+    const target = try MockBackend.createTexture(&device, .{
+        .size = .{ .width = 8, .height = 8 },
+        .format = .rgba8_unorm,
+    });
+    defer MockBackend.destroyTexture(&device, target);
+
+    const inf_val = std.math.inf(f32);
+    const inf_verts = [3]Vertex2D{
+        .{ .pos = .{ inf_val, 0.0 }, .color = .{ 255, 0, 0, 255 } },
+        .{ .pos = .{ 0.0, inf_val }, .color = .{ 0, 255, 0, 255 } },
+        .{ .pos = .{ 0.0, 0.0 }, .color = .{ 0, 0, 255, 255 } },
+    };
+    const vbuf = try MockBackend.createBuffer(&device, .{
+        .size = @sizeOf(@TypeOf(inf_verts)),
+        .usage = hal.BufferUsage.vertex_dst,
+    });
+    defer MockBackend.destroyBuffer(&device, vbuf);
+    MockBackend.writeBuffer(&queue, vbuf, 0, std.mem.sliceAsBytes(&inf_verts));
+
+    const vs = try MockBackend.createShaderModule(&device, .{ .code = "vs" });
+    const pipeline = try MockBackend.createRenderPipeline(&device, .{ .vertex_shader = vs });
+
+    var encoder = try MockBackend.createCommandEncoder(&device);
+    var pass = try MockBackend.beginRenderPass(&encoder, .{
+        .color_attachment = .{
+            .target = target,
+            .load_op = .clear,
+            .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
+        },
+    });
+    MockBackend.setPipeline(&pass, pipeline);
+    MockBackend.setVertexBuffer(&pass, 0, vbuf, 0);
+    MockBackend.draw(&pass, 3, 1, 0, 0);
+    MockBackend.endRenderPass(&pass);
+
+    const cb = try MockBackend.finishCommandEncoder(&encoder);
+    MockBackend.submit(&queue, &[_]hal.CommandBuffer{cb});
+
+    var readback: [8 * 8 * 4]u8 = undefined;
+    try MockBackend.readbackTarget(&device, target, &readback);
+
+    // Target pixels must remain clear black
+    try std.testing.expectEqual(@as(u8, 0), readback[0]);
+    try std.testing.expectEqual(@as(u8, 255), readback[3]);
+}
+
+test "MockBackend: Multiple instances rasterized when instance_count > 1" {
+    var device: MockBackend.Device = undefined;
+    MockBackend.Device.init(&device);
+    var queue = MockBackend.Queue.init(&device);
+
+    const target = try MockBackend.createTexture(&device, .{
+        .size = .{ .width = 8, .height = 8 },
+        .format = .rgba8_unorm,
+    });
+    defer MockBackend.destroyTexture(&device, target);
+
+    const quad_verts = makeQuadVertices(1.0, 1.0, 4.0, 4.0, .{ 50, 0, 0, 128 });
+    const vbuf = try MockBackend.createBuffer(&device, .{
+        .size = @sizeOf(@TypeOf(quad_verts)),
+        .usage = hal.BufferUsage.vertex_dst,
+    });
+    defer MockBackend.destroyBuffer(&device, vbuf);
+    MockBackend.writeBuffer(&queue, vbuf, 0, std.mem.sliceAsBytes(&quad_verts));
+
+    const vs = try MockBackend.createShaderModule(&device, .{ .code = "vs" });
+    const pipeline = try MockBackend.createRenderPipeline(&device, .{ .vertex_shader = vs });
+
+    var encoder = try MockBackend.createCommandEncoder(&device);
+    var pass = try MockBackend.beginRenderPass(&encoder, .{
+        .color_attachment = .{
+            .target = target,
+            .load_op = .clear,
+            .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
+        },
+    });
+    MockBackend.setPipeline(&pass, pipeline);
+    MockBackend.setVertexBuffer(&pass, 0, vbuf, 0);
+    // Draw 2 instances: pixel will be blended twice
+    MockBackend.draw(&pass, 6, 2, 0, 0);
+    MockBackend.endRenderPass(&pass);
+
+    const cb = try MockBackend.finishCommandEncoder(&encoder);
+    MockBackend.submit(&queue, &[_]hal.CommandBuffer{cb});
+
+    var readback: [8 * 8 * 4]u8 = undefined;
+    try MockBackend.readbackTarget(&device, target, &readback);
+
+    // Pixel at (2, 2) blended twice: 1st blend -> 25, 2nd blend -> 37
+    const idx = (2 * 8 + 2) * 4;
+    try std.testing.expect(readback[idx + 0] > 25);
 }
