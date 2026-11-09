@@ -1,0 +1,190 @@
+name: CI Quality Gates
+
+on:
+  push:
+    branches: [main, "ci/**", "feat/**", "fix/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-format:
+    name: Lint & Formatting Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Format Check (zig fmt)
+        run: zig fmt --check spikes/*.zig tools/*.zig build.zig
+
+      - name: TigerStyle Static Analysis Linter
+        run: zig run tools/lint.zig
+
+  cross-compile-matrix:
+    name: Cross-Compilation (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # Tier 1 Desktop
+          - aarch64-macos
+          - x86_64-macos
+          - x86_64-linux-gnu
+          - x86_64-linux-musl
+          - aarch64-linux-gnu
+          - aarch64-linux-musl
+          # Tier 2 Windows
+          - x86_64-windows-gnu
+          # Tier 3 Mobile
+          - aarch64-linux-android
+          - aarch64-ios
+          # Tier 4 BSD
+          - x86_64-freebsd
+          - aarch64-freebsd
+          # Tier 5 Web
+          - wasm32-freestanding
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Cross-Compile Spike
+        run: |
+          zig build-obj spikes/resize_1cycle.zig -target ${{ matrix.target }} -O ReleaseSmall
+
+  non-posix-fence:
+    name: Non-POSIX Isolation Fence (Wasm & Windows)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Freestanding Wasm Compile Check
+        run: zig build-obj spikes/resize_1cycle.zig -target wasm32-freestanding -O ReleaseSmall
+
+      - name: Win32 Freestanding Compile Check
+        run: zig build-obj spikes/resize_1cycle.zig -target x86_64-windows-gnu -O ReleaseSmall
+
+  size-budget:
+    name: Binary Size Budget Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Verify Linux musl Size Budget (<= 15,360 bytes)
+        run: |
+          zig build-exe spikes/engine_m0.zig -target x86_64-linux-musl -O ReleaseSmall -fstrip -femit-bin=engine_musl
+          SIZE=$(stat -c%s engine_musl)
+          echo "Stripped musl binary size: ${SIZE} bytes (limit: 15360 bytes)"
+          if [ "${SIZE}" -gt 15360 ]; then
+            echo "ERROR: Musl binary size ${SIZE} exceeds 15,360 bytes budget!"
+            exit 1
+          fi
+
+      - name: Verify Mach-O Size Budget (<= 52,000 bytes)
+        run: |
+          zig build-exe spikes/engine_m0.zig -target aarch64-macos -O ReleaseSmall -fstrip -femit-bin=engine_macho
+          SIZE=$(stat -c%s engine_macho)
+          echo "Stripped Mach-O binary size: ${SIZE} bytes (limit: 52000 bytes)"
+          if [ "${SIZE}" -gt 52000 ]; then
+            echo "ERROR: Mach-O binary size ${SIZE} exceeds 52,000 bytes budget!"
+            exit 1
+          fi
+
+  test-and-fuzz-linux:
+    name: Test & Fuzz (Linux x86_64 Native)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Run Test Suites & Oracles
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Run Adversarial Newton Fuzzer
+        run: zig test spikes/test_fuzz_newton.zig -O ReleaseFast
+
+      - name: Run Autopsy Glyph Delta-1 Oracle
+        run: zig test spikes/autopsy_glyph_delta1.zig -O ReleaseFast
+
+  test-and-fuzz-macos:
+    name: Test & Fuzz (macOS ARM64 Native & Rosetta 2)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Run Native ARM64 Test Suites
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Run Native Newton Fuzzer
+        run: zig test spikes/test_fuzz_newton.zig -O ReleaseFast
+
+      - name: Run Native Glyph Delta-1 Autopsy
+        run: zig test spikes/autopsy_glyph_delta1.zig -O ReleaseFast
+
+      - name: Run Native TrueType Font Benchmark
+        run: zig run spikes/truetype_real.zig -O ReleaseFast
+
+      - name: Rosetta 2 Emulated Cross-Execution
+        run: |
+          zig test spikes/paint_pipeline.zig -target x86_64-macos -O ReleaseFast --test-no-exec -femit-bin=paint_pipeline_x86
+          arch -x86_64 ./paint_pipeline_x86
+          rm ./paint_pipeline_x86
+
+  required:
+    name: Required Status Gate
+    if: always()
+    needs:
+      - lint-and-format
+      - cross-compile-matrix
+      - non-posix-fence
+      - size-budget
+      - test-and-fuzz-linux
+      - test-and-fuzz-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate Upstream Quality Gates
+        run: |
+          results='${{ toJSON(needs) }}'
+          echo "Evaluating job results: ${results}"
+          if echo "${results}" | grep -q '"result": *"failure"' || echo "${results}" | grep -q '"result": *"cancelled"'; then
+            echo "ERROR: One or more upstream quality gates failed or were cancelled."
+            exit 1
+          fi
+          echo "All quality gates successfully passed!"

@@ -70,8 +70,8 @@ pub fn main() !void {
     // Let's check curve 6: is it a line?
     const prep6 = prep_storage[6];
     std.debug.print("prep6.is_line = {}\n", .{prep6.is_line});
-    std.debug.print("prep6.ax={e}, ay={e}\n", .{prep6.ax, prep6.ay});
-    std.debug.print("prep6.bx={e}, by={e}\n", .{prep6.bx, prep6.by});
+    std.debug.print("prep6.ax={e}, ay={e}\n", .{ prep6.ax, prep6.ay });
+    std.debug.print("prep6.bx={e}, by={e}\n", .{ prep6.bx, prep6.by });
 
     // In Fast:
     // How chunk_dist_sq was updated for chunk 1, lane 2:
@@ -93,7 +93,9 @@ pub fn main() !void {
     const dist_sq_1 = dx_1 * dx_1 + dy_1 * dy_1;
     var cand_dist_sq = @min(dist_sq_0, dist_sq_1);
     std.debug.print("t=0 dist_sq={d:.9}, t=1 dist_sq={d:.9} (dist_1={d:.9})\n", .{
-        dist_sq_0, dist_sq_1, @sqrt(dist_sq_1)
+        dist_sq_0,
+        dist_sq_1,
+        @sqrt(dist_sq_1),
     });
 
     if (prep6.is_line) {
@@ -103,7 +105,9 @@ pub fn main() !void {
         const dist_sq_l = dx_l * dx_l + dy_l * dy_l;
         cand_dist_sq = @min(cand_dist_sq, dist_sq_l);
         std.debug.print("Line: t_line={d:.9}, dist_sq_l={d:.9}, dist={d:.9}\n", .{
-            t_line, dist_sq_l, @sqrt(dist_sq_l)
+            t_line,
+            dist_sq_l,
+            @sqrt(dist_sq_l),
         });
     } else {
         std.debug.print("Quad Newton-Raphson:\n", .{});
@@ -122,7 +126,10 @@ pub fn main() !void {
             const dist_sq_t = dx_t * dx_t + dy_t * dy_t;
             cand_dist_sq = @min(cand_dist_sq, dist_sq_t);
             std.debug.print("  seed {d:.2} -> t={d:.9}, dist_sq={d:.9}, dist={d:.9}\n", .{
-                seed, t, dist_sq_t, @sqrt(dist_sq_t)
+                seed,
+                t,
+                dist_sq_t,
+                @sqrt(dist_sq_t),
             });
         }
     }
@@ -147,10 +154,16 @@ pub fn main() !void {
     const byte_base = @as(u8, @intFromFloat(byte_f32_base));
     std.debug.print("\nComparison:\n", .{});
     std.debug.print("d_base = {d:.9}, norm_base = {d:.9}, byte_f32_base = {d:.9} -> {d}\n", .{
-        d_base, norm_base, byte_f32_base, byte_base
+        d_base,
+        norm_base,
+        byte_f32_base,
+        byte_base,
     });
     std.debug.print("d_fast = {d:.9}, norm_fast = {d:.9}, byte_f32_fast = {d:.9} -> {d}\n", .{
-        d_fast, norm_fast, byte_f32_fast, byte_fast
+        d_fast,
+        norm_fast,
+        byte_f32_fast,
+        byte_fast,
     });
     std.debug.print("diff d = {e}\n", .{@abs(d_base - d_fast)});
     std.debug.print("diff norm = {e}\n", .{@abs(norm_base - norm_fast)});

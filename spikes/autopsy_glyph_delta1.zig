@@ -316,7 +316,13 @@ pub fn performAutopsy(font: *const TrueTypeFont) !AutopsyReport {
 
 pub fn main() !void {
     const font_path = "/System/Library/Fonts/Supplemental/Arial.ttf";
-    const file_len = try loadFontFile(font_path);
+    const file_len = loadFontFile(font_path) catch |err| {
+        std.debug.print(
+            "Notice: System font '{s}' not found ({s}). Skipping autopsy.\n",
+            .{ font_path, @errorName(err) },
+        );
+        return;
+    };
     const font = try TrueTypeFont.init(font_file_buffer[0..file_len]);
 
     std.debug.print(
@@ -400,7 +406,10 @@ pub fn main() !void {
 
 test "Autopsy: glyph 92 is the sole divergent glyph with benign threshold flip" {
     const font_path = "/System/Library/Fonts/Supplemental/Arial.ttf";
-    const file_len = try loadFontFile(font_path);
+    const file_len = loadFontFile(font_path) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     const font = try TrueTypeFont.init(font_file_buffer[0..file_len]);
 
     const report = try performAutopsy(&font);

@@ -77,16 +77,25 @@ pub fn main() !void {
                     diff_px += 1;
                     max_d = @max(max_d, d);
                     std.debug.print("Diff at glyph {d}, (px,py)=({d},{d}): base={d}, fast={d}\n", .{
-                        g, px, py, b, f
+                        g,
+                        px,
+                        py,
+                        b,
+                        f,
                     });
                 }
             }
         }
 
         if (max_d > 0) {
-            std.debug.print("FOUND DIVERGENT GLYPH: index={d}, max_delta={d}, diff_count={d}\n", .{
-                g, max_d, diff_px
-            });
+            std.debug.print(
+                "FOUND DIVERGENT GLYPH: index={d}, max_delta={d}, diff_count={d}\n",
+                .{
+                    g,
+                    max_d,
+                    diff_px,
+                },
+            );
         }
     }
 }
