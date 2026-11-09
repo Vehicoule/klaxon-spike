@@ -37,6 +37,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "root", .path = "src/root.zig" },
         .{ .name = "platform-os", .path = "src/platform/os.zig" },
         .{ .name = "platform-time", .path = "src/platform/time.zig" },
+        .{ .name = "gpu-tests", .path = "src/gpu/hal.zig" },
+        .{ .name = "gpu-mock", .path = "src/gpu/mock.zig" },
         .{ .name = "lint-tests", .path = "tools/lint.zig" },
         .{ .name = "fuzz-newton", .path = "spikes/test_fuzz_newton.zig" },
         .{ .name = "autopsy-glyph", .path = "spikes/autopsy_glyph_delta1.zig" },
@@ -47,11 +49,13 @@ pub fn build(b: *std.Build) void {
     };
 
     inline for (tests) |t| {
+        const is_spike = std.mem.startsWith(u8, t.path, "spikes/");
+        const test_opt = if (is_spike and optimize == .debug) .fast else optimize;
         const test_exe = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(t.path),
                 .target = target,
-                .optimize = optimize,
+                .optimize = test_opt,
             }),
         });
         const run_test = b.addRunArtifact(test_exe);
