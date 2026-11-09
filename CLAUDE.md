@@ -14,13 +14,16 @@ zig build lint
 zig run tools/lint.zig
 
 # Check code formatting (always run before committing)
-zig fmt --check spikes/*.zig tools/*.zig build.zig
+zig fmt --check spikes/*.zig tools/*.zig build.zig src/*.zig src/*/*.zig
 
 # Format all Zig files
-zig fmt spikes/*.zig tools/*.zig build.zig
+zig fmt spikes/*.zig tools/*.zig build.zig src/*.zig src/*/*.zig
 
 # Run all test suites
-zig build test
+zig build test -Doptimize=ReleaseFast
+
+# Run all flagship performance benchmarks (resize, truetype, perf_100x, alt_architectures)
+zig build bench -Doptimize=ReleaseFast
 ```
 
 ### Spikes Execution
@@ -30,6 +33,12 @@ zig run spikes/resize_1cycle.zig -O ReleaseFast
 
 # TrueType font parsing & vector SDF typography benchmark (Arial.ttf)
 zig run spikes/truetype_real.zig -O ReleaseFast
+
+# Radical 100x SDF rasterization prototype benchmark
+zig run spikes/perf_100x_prototype.zig -O ReleaseFast
+
+# Alternative architectures benchmark (comptime folding, hardware bitmask CTZ)
+zig run spikes/alt_architectures_bench.zig -O ReleaseFast
 
 # Adversarial 1,000 curves Newton solver geometry fuzzer
 zig test spikes/test_fuzz_newton.zig -O ReleaseFast
@@ -46,6 +55,14 @@ zig run spikes/engine_m0.zig -O ReleaseFast
 
 ### Multi-Target & Cross-Compilation Checks
 ```bash
+# WebAssembly execution via Wasmtime
+zig build-exe spikes/resize_1cycle.zig -target wasm32-wasi -O ReleaseFast -femit-bin=resize.wasm
+wasmtime resize.wasm
+
+# iOS Simulator execution via xcrun simctl
+zig build-exe spikes/resize_1cycle.zig -target aarch64-ios-simulator -O ReleaseFast -femit-bin=resize_ios
+xcrun simctl spawn booted ./resize_ios
+
 # Non-POSIX freestanding fence (must compile without libc or POSIX)
 zig build-obj spikes/resize_1cycle.zig -target wasm32-freestanding -O ReleaseSmall
 zig build-obj spikes/resize_1cycle.zig -target x86_64-windows-gnu -O ReleaseSmall

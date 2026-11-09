@@ -33,11 +33,37 @@ comptime {
     assert(patch_pixels == 1024);
 }
 
-/// Horloge monotone haute résolution (nanosecondes) compatible Apple Silicon / POSIX.
+const builtin = @import("builtin");
+
+const is_windows = (builtin.target.os.tag == .windows);
+const is_wasi = (builtin.target.os.tag == .wasi);
+const is_posix = (builtin.target.os.tag != .windows and
+    builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
+
+extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) callconv(.winapi) i32;
+extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) callconv(.winapi) i32;
+
+/// Horloge monotone haute résolution (nanosecondes) compatible multi-OS.
 fn readTimestampNs() u64 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+    if (is_windows) {
+        var count: i64 = 0;
+        var freq: i64 = 0;
+        _ = QueryPerformanceCounter(&count);
+        _ = QueryPerformanceFrequency(&freq);
+        if (freq == 0) return 0;
+        return @intCast(@divFloor(@as(i128, count) * 1_000_000_000, freq));
+    } else if (is_wasi) {
+        var ts: std.os.wasi.timestamp_t = 0;
+        _ = std.os.wasi.clock_time_get(.MONOTONIC, 1, &ts);
+        return ts;
+    } else if (is_posix) {
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+    } else {
+        return 0;
+    }
 }
 
 /// Métriques statistiques rigoureuses pour l'évaluation de performance.

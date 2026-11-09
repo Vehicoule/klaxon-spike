@@ -28,6 +28,7 @@ pub const is_posix = (builtin.target.os.tag != .windows and
     builtin.target.os.tag != .freestanding and
     builtin.target.os.tag != .wasi);
 pub const is_wasm = builtin.target.cpu.arch.isWasm();
+pub const is_wasi = (builtin.target.os.tag == .wasi);
 pub const is_freestanding = (builtin.target.os.tag == .freestanding);
 
 // ============================================================================
@@ -87,6 +88,7 @@ extern "kernel32" fn CreateFileW(
 ) callconv(.winapi) ?*anyopaque;
 
 extern "kernel32" fn CloseHandle(hObject: ?*anyopaque) callconv(.winapi) i32;
+extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) i32;
 extern "kernel32" fn GetFileSizeEx(hFile: ?*anyopaque, lpFileSize: *i64) callconv(.winapi) i32;
 extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) callconv(.winapi) i32;
 extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) callconv(.winapi) i32;
@@ -106,6 +108,11 @@ pub fn readMonotonicClockNs() u64 {
         if (qpc_ok == 0 or qpf_ok == 0) return 0;
         if (freq <= 0 or count <= 0) return 0;
         return @intCast(@divFloor(@as(i128, count) * 1_000_000_000, freq));
+    } else if (is_wasi) {
+        var ts: std.os.wasi.timestamp_t = 0;
+        const rc = std.os.wasi.clock_time_get(.MONOTONIC, 1, &ts);
+        if (rc != .SUCCESS) return 0;
+        return ts;
     } else if (is_posix) {
         var ts: std.posix.timespec = undefined;
         const rc = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
@@ -132,7 +139,7 @@ pub inline fn toCyclesAt4Ghz(ns: u64) u64 {
 // Direct Standard Output & Error (Zero Heap Allocation)
 // ============================================================================
 
-fn writeAllToStream(posix_fd: std.posix.fd_t, win_std_handle: i32, bytes: []const u8) void {
+fn writeAllToStream(posix_fd: i32, win_std_handle: i32, bytes: []const u8) void {
     if (bytes.len == 0) return;
     if (is_windows) {
         const handle = GetStdHandle(win_std_handle);
@@ -154,6 +161,19 @@ fn writeAllToStream(posix_fd: std.posix.fd_t, win_std_handle: i32, bytes: []cons
             if (ok == 0 or chunk_written == 0) break;
             written_total += chunk_written;
         }
+    } else if (is_wasi) {
+        var written_total: usize = 0;
+        const fd: std.os.wasi.fd_t = @intCast(posix_fd);
+        while (written_total < bytes.len) {
+            const iov = [_]std.posix.iovec_const{.{
+                .base = bytes[written_total..].ptr,
+                .len = bytes.len - written_total,
+            }};
+            var written: usize = 0;
+            const rc = std.os.wasi.fd_write(fd, &iov, 1, &written);
+            if (rc != .SUCCESS or written == 0) break;
+            written_total += written;
+        }
     } else if (is_posix) {
         var written_total: usize = 0;
         while (written_total < bytes.len) {
@@ -162,7 +182,11 @@ fn writeAllToStream(posix_fd: std.posix.fd_t, win_std_handle: i32, bytes: []cons
                 else => @as(usize, std.math.maxInt(i32)),
             };
             const chunk_len = @min(bytes.len - written_total, max_chunk);
-            const rc = std.posix.system.write(posix_fd, bytes[written_total..].ptr, chunk_len);
+            const rc = std.posix.system.write(
+                @intCast(posix_fd),
+                bytes[written_total..].ptr,
+                chunk_len,
+            );
             switch (std.posix.errno(rc)) {
                 .SUCCESS => {
                     const n: usize = @intCast(rc);
@@ -404,6 +428,23 @@ pub fn closeFile(handle: FileHandle) void {
     }
 }
 
+/// Deletes a file from the filesystem.
+pub fn deleteFile(path: []const u8) void {
+    if (is_windows) {
+        if (path.len >= 1024) return;
+        var utf16_buf: [1025]u16 = undefined;
+        const len = std.unicode.utf8ToUtf16Le(&utf16_buf, path) catch return;
+        utf16_buf[len] = 0;
+        _ = DeleteFileW(utf16_buf[0..len :0]);
+    } else if (is_posix) {
+        var path_z: [1024]u8 = undefined;
+        if (path.len >= 1024) return;
+        @memcpy(path_z[0..path.len], path);
+        path_z[path.len] = 0;
+        _ = std.posix.system.unlink(path_z[0..path.len :0]);
+    }
+}
+
 /// Retrieves the exact file size in bytes.
 pub fn getFileSize(handle: FileHandle) FileError!u64 {
     assert(handle.isValid());
@@ -519,9 +560,7 @@ test "File I/O operations round-trip in /tmp" {
 
     var path_buf: [128]u8 = undefined;
     const test_path = try makeTestPath(&path_buf, "klaxon_io_roundtrip");
-    defer if (is_posix) {
-        _ = std.posix.system.unlink(test_path);
-    };
+    defer deleteFile(test_path);
     const payload = "Klaxon TigerStyle Zero-Libc I/O Pipeline\n";
 
     // Write file
@@ -553,9 +592,7 @@ test "File I/O empty file handling" {
 
     var path_buf: [128]u8 = undefined;
     const empty_path = try makeTestPath(&path_buf, "klaxon_io_empty");
-    defer if (is_posix) {
-        _ = std.posix.system.unlink(empty_path);
-    };
+    defer deleteFile(empty_path);
 
     const handle = try openFile(empty_path, .create_truncate);
     closeFile(handle);
@@ -570,9 +607,7 @@ test "File I/O write_only preserves remaining bytes" {
 
     var path_buf: [128]u8 = undefined;
     const test_path = try makeTestPath(&path_buf, "klaxon_io_write_only");
-    defer if (is_posix) {
-        _ = std.posix.system.unlink(test_path);
-    };
+    defer deleteFile(test_path);
 
     // Create file with initial content
     const init_handle = try openFile(test_path, .create_truncate);

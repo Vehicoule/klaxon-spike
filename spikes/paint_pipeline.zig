@@ -30,9 +30,10 @@ const shader = @import("unified_shader.zig");
 // Portabilité Cross-Platform : Header Multi-OS & Zéro Dépendance Libc
 // ============================================================================
 
-const is_windows = (builtin.os.tag == .windows);
-const is_posix = (builtin.os.tag != .windows and builtin.os.tag != .freestanding and
-    builtin.os.tag != .wasi);
+const is_windows = (builtin.target.os.tag == .windows);
+const is_wasi = (builtin.target.os.tag == .wasi);
+const is_posix = (builtin.target.os.tag != .windows and builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
 
 const STD_OUTPUT_HANDLE: i32 = -11;
 
@@ -52,6 +53,10 @@ fn printStr(str: []const u8) void {
         const handle = GetStdHandle(STD_OUTPUT_HANDLE);
         var written: u32 = 0;
         _ = WriteFile(handle, str.ptr, @intCast(str.len), &written, null);
+    } else if (is_wasi) {
+        const iov = [_]std.posix.iovec_const{.{ .base = str.ptr, .len = str.len }};
+        var written: usize = 0;
+        _ = std.os.wasi.fd_write(1, &iov, 1, &written);
     } else if (is_posix) {
         _ = std.posix.system.write(1, str.ptr, str.len);
     }
@@ -71,6 +76,10 @@ fn readTimestampNs() u64 {
         _ = QueryPerformanceFrequency(&freq);
         if (freq == 0) return 0;
         return @intCast(@divFloor(@as(i128, count) * 1_000_000_000, freq));
+    } else if (is_wasi) {
+        var ts: std.os.wasi.timestamp_t = 0;
+        _ = std.os.wasi.clock_time_get(.MONOTONIC, 1, &ts);
+        return ts;
     } else if (is_posix) {
         var ts: std.posix.timespec = undefined;
         _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
@@ -1758,7 +1767,9 @@ pub fn processRasterBatchWithTimeBudget(
             continue;
         }
 
-        if (atlas.hasTimeBudget()) {
+        // Garantit le progrès minimal : au moins une unité par frame pour éliminer la
+        // famine sous jitter de virtualisation cloud (TigerStyle Real-Time SLA).
+        if (rasterized_count == 0 or atlas.hasTimeBudget()) {
             var patch_buf: [32 * 32]u8 = undefined;
             const w: u32 = @min(32, req.width_px);
             const h: u32 = @min(32, req.height_px);
@@ -2532,56 +2543,27 @@ test "GlyphAtlas: real wall-clock time-budget throttling and progressive stabili
     // Prouve que la rasterisation à froid est gouvernée par le chronomètre nano-timer,
     // garantissant 0 drop de frame à 120 Hz et une stabilisation progressive en tofu transitoire.
     GlyphAtlas.init(&global_atlas);
-    // Alloue un budget temps microscopique pour forcer le throttling (100 us)
-    global_atlas.time_budget_ns = 10_000;
+    // Alloue un budget temps microscopique pour forcer le throttling (20 us)
+    global_atlas.time_budget_ns = 20_000;
     global_atlas.beginFrame(1);
 
-    const requests = [6]GlyphRasterRequest{
-        .{
-            .key = .{ .glyph_index = 101, .font_id = 1, .size_px = 32 },
-            .curves = &glyph_w_curves,
+    var requests: [24]GlyphRasterRequest = undefined;
+    for (&requests, 0..) |*req, idx| {
+        req.* = .{
+            .key = .{ .glyph_index = @intCast(101 + idx), .font_id = 1, .size_px = 32 },
+            .curves = if (idx % 2 == 0) &glyph_w_curves else &glyph_e_curves,
             .width_px = 32,
             .height_px = 32,
-        },
-        .{
-            .key = .{ .glyph_index = 102, .font_id = 1, .size_px = 32 },
-            .curves = &glyph_e_curves,
-            .width_px = 32,
-            .height_px = 32,
-        },
-        .{
-            .key = .{ .glyph_index = 103, .font_id = 1, .size_px = 32 },
-            .curves = &glyph_w_curves,
-            .width_px = 32,
-            .height_px = 32,
-        },
-        .{
-            .key = .{ .glyph_index = 104, .font_id = 1, .size_px = 32 },
-            .curves = &glyph_e_curves,
-            .width_px = 32,
-            .height_px = 32,
-        },
-        .{
-            .key = .{ .glyph_index = 105, .font_id = 1, .size_px = 32 },
-            .curves = &glyph_w_curves,
-            .width_px = 32,
-            .height_px = 32,
-        },
-        .{
-            .key = .{ .glyph_index = 106, .font_id = 1, .size_px = 32 },
-            .curves = &glyph_e_curves,
-            .width_px = 32,
-            .height_px = 32,
-        },
-    };
+        };
+    }
 
-    var slots: [6]AtlasSlot = undefined;
+    var slots: [24]AtlasSlot = undefined;
     const f1_rasterized = processRasterBatchWithTimeBudget(&global_atlas, &requests, &slots);
 
     // Le quota temps a interrompu la rasterisation en cours de route
     try std.testing.expect(global_atlas.time_budget_exhausted);
     try std.testing.expect(f1_rasterized > 0);
-    try std.testing.expect(f1_rasterized < 6);
+    try std.testing.expect(f1_rasterized < 24);
 
     // Les glyphes restants de la frame 1 sont immédiatement substitués par le Tofu stable
     var tofu_substitutions_f1: u32 = 0;
@@ -2590,7 +2572,7 @@ test "GlyphAtlas: real wall-clock time-budget throttling and progressive stabili
             tofu_substitutions_f1 += 1;
         }
     }
-    try std.testing.expectEqual(6 - f1_rasterized, tofu_substitutions_f1);
+    try std.testing.expectEqual(24 - f1_rasterized, tofu_substitutions_f1);
 
     // Frame 2 : budget réinitialisé, les glyphes déjà chauds sont servis du cache en 0 ns,
     // et les suivants sont progressivement rasterisés

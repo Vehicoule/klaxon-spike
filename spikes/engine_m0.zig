@@ -12,11 +12,59 @@ const std = @import("std");
 const assert = std.debug.assert;
 const shader = @import("unified_shader.zig");
 
+const builtin = @import("builtin");
+
+const is_windows = (builtin.target.os.tag == .windows);
+const is_wasi = (builtin.target.os.tag == .wasi);
+const is_posix = (builtin.target.os.tag != .windows and
+    builtin.target.os.tag != .freestanding and
+    builtin.target.os.tag != .wasi);
+
+const STD_OUTPUT_HANDLE: i32 = -11;
+const STD_ERROR_HANDLE: i32 = -12;
+
+extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn WriteFile(
+    hFile: ?*anyopaque,
+    lpBuffer: [*]const u8,
+    nNumberOfBytesToWrite: u32,
+    lpNumberOfBytesWritten: ?*u32,
+    lpOverlapped: ?*anyopaque,
+) callconv(.winapi) i32;
+
+fn writeStdout(bytes: []const u8) void {
+    if (is_windows) {
+        const handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        var written: u32 = 0;
+        _ = WriteFile(handle, bytes.ptr, @intCast(bytes.len), &written, null);
+    } else if (is_wasi) {
+        const iov = [_]std.posix.iovec_const{.{ .base = bytes.ptr, .len = bytes.len }};
+        var written: usize = 0;
+        _ = std.os.wasi.fd_write(1, &iov, 1, &written);
+    } else if (is_posix) {
+        _ = std.posix.system.write(1, bytes.ptr, bytes.len);
+    }
+}
+
 // Désactive le runtime `std.Io.Threaded` global (1.06 MB / 1.5s de compilation LLVM en Debug)
 // et la pile de signal TLS de 256 KB introduits par défaut dans Zig 0.17.1.
 fn minimalPanic(message: []const u8, _: ?usize) noreturn {
-    _ = std.posix.system.write(2, message.ptr, message.len);
-    _ = std.posix.system.write(2, "\n", 1);
+    if (is_windows) {
+        const handle = GetStdHandle(STD_ERROR_HANDLE);
+        var written: u32 = 0;
+        _ = WriteFile(handle, message.ptr, @intCast(message.len), &written, null);
+        _ = WriteFile(handle, "\n", 1, &written, null);
+    } else if (is_wasi) {
+        const iov = [_]std.posix.iovec_const{
+            .{ .base = message.ptr, .len = message.len },
+            .{ .base = "\n", .len = 1 },
+        };
+        var written: usize = 0;
+        _ = std.os.wasi.fd_write(2, &iov, 2, &written);
+    } else if (is_posix) {
+        _ = std.posix.system.write(2, message.ptr, message.len);
+        _ = std.posix.system.write(2, "\n", 1);
+    }
     @trap();
 }
 pub const panic = std.debug.FullPanic(minimalPanic);
@@ -40,7 +88,7 @@ pub fn main() void {
     std.mem.doNotOptimizeAway(pixel_hash);
 
     const banner = "[M0 OK] 17 nodes | 3 active items | 4-pass layout & deterministic replay verified\n";
-    _ = std.posix.system.write(1, banner.ptr, banner.len);
+    writeStdout(banner);
 }
 
 // ============================================================================
