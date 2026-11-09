@@ -24,7 +24,7 @@ jobs:
           version: 0.17.1
 
       - name: Format Check (zig fmt)
-        run: zig fmt --check spikes/*.zig tools/*.zig build.zig
+        run: zig fmt --check spikes/*.zig tools/*.zig build.zig src/*.zig src/*/*.zig
 
       - name: TigerStyle Static Analysis Linter
         run: zig run tools/lint.zig
@@ -48,11 +48,13 @@ jobs:
           # Tier 3 Mobile
           - aarch64-linux-android
           - aarch64-ios
+          - aarch64-ios-simulator
           # Tier 4 BSD
           - x86_64-freebsd
           - aarch64-freebsd
           # Tier 5 Web
           - wasm32-freestanding
+          - wasm32-wasi
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -83,6 +85,9 @@ jobs:
 
       - name: Win32 Freestanding Compile Check
         run: zig build-obj spikes/resize_1cycle.zig -target x86_64-windows-gnu -O ReleaseSmall
+
+      - name: Root Module Freestanding Check
+        run: zig build-obj src/root.zig -target wasm32-freestanding -O ReleaseSmall
 
   size-budget:
     name: Binary Size Budget Verification
@@ -116,8 +121,8 @@ jobs:
             exit 1
           fi
 
-  test-and-fuzz-linux:
-    name: Test & Fuzz (Linux x86_64 Native)
+  test-and-bench-linux:
+    name: Test & Bench (Linux x86_64 Native)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -137,8 +142,11 @@ jobs:
       - name: Run Autopsy Glyph Delta-1 Oracle
         run: zig test spikes/autopsy_glyph_delta1.zig -O ReleaseFast
 
-  test-and-fuzz-macos:
-    name: Test & Fuzz (macOS ARM64 Native & Rosetta 2)
+      - name: Run Flagship Performance Benchmarks (ReleaseFast)
+        run: zig build bench -Doptimize=ReleaseFast
+
+  test-and-bench-macos-ios:
+    name: Test & Bench (macOS ARM64, Rosetta 2 & iOS Simulator)
     runs-on: macos-latest
     steps:
       - name: Checkout Repository
@@ -158,14 +166,147 @@ jobs:
       - name: Run Native Glyph Delta-1 Autopsy
         run: zig test spikes/autopsy_glyph_delta1.zig -O ReleaseFast
 
-      - name: Run Native TrueType Font Benchmark
-        run: zig run spikes/truetype_real.zig -O ReleaseFast
+      - name: Run Native Flagship Benchmarks (ReleaseFast)
+        run: zig build bench -Doptimize=ReleaseFast
 
       - name: Rosetta 2 Emulated Cross-Execution
         run: |
           zig test spikes/paint_pipeline.zig -target x86_64-macos -O ReleaseFast --test-no-exec -femit-bin=paint_pipeline_x86
           arch -x86_64 ./paint_pipeline_x86
-          rm ./paint_pipeline_x86
+          zig build-exe spikes/resize_1cycle.zig -target x86_64-macos -O ReleaseFast -femit-bin=resize_x86
+          arch -x86_64 ./resize_x86
+          rm ./paint_pipeline_x86 ./resize_x86
+
+      - name: iOS Simulator Cross-Execution (xcrun simctl)
+        run: |
+          zig build-exe spikes/resize_1cycle.zig -target aarch64-ios-simulator -O ReleaseFast -femit-bin=resize_ios_sim
+          zig test spikes/paint_pipeline.zig -target aarch64-ios-simulator -O ReleaseFast --test-no-exec -femit-bin=paint_ios_sim
+          DEVICE_NAME=$(xcrun simctl list devices available | grep -E "iPhone [0-9]+" | head -n 1 | sed -E 's/.*(iPhone [^()]+).*/\1/' | xargs)
+          echo "Booting iOS Simulator device: '${DEVICE_NAME}'"
+          xcrun simctl boot "${DEVICE_NAME}"
+          xcrun simctl spawn booted ./paint_ios_sim
+          xcrun simctl spawn booted ./resize_ios_sim
+          xcrun simctl shutdown "${DEVICE_NAME}"
+          rm ./resize_ios_sim ./paint_ios_sim
+
+  test-and-bench-windows:
+    name: Test & Bench (Windows x86_64 Native)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Run Windows Native Test Suites
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Run Windows Native Newton Fuzzer
+        run: zig test spikes/test_fuzz_newton.zig -O ReleaseFast
+
+      - name: Run Windows Native Autopsy Oracle
+        run: zig test spikes/autopsy_glyph_delta1.zig -O ReleaseFast
+
+      - name: Run Windows Native Flagship Benchmarks (ReleaseFast)
+        run: zig build bench -Doptimize=ReleaseFast
+
+  test-and-bench-wasm:
+    name: Test & Bench (WebAssembly WASI via Wasmtime)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Install Wasmtime
+        run: |
+          curl https://wasmtime.dev/install.sh -sSf | bash
+          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+
+      - name: Compile WASI Test & Benchmark Binaries
+        run: |
+          zig build-exe spikes/resize_1cycle.zig -target wasm32-wasi -O ReleaseFast -femit-bin=resize_1cycle.wasm
+          zig test spikes/resize_1cycle.zig -target wasm32-wasi -O ReleaseFast --test-no-exec -femit-bin=test_resize.wasm
+          zig test spikes/paint_pipeline.zig -target wasm32-wasi -O ReleaseFast --test-no-exec -femit-bin=test_paint.wasm
+
+      - name: Execute WASI Tests & Benchmarks via Wasmtime
+        run: |
+          wasmtime test_paint.wasm
+          wasmtime test_resize.wasm
+          wasmtime resize_1cycle.wasm
+
+  test-and-bench-android:
+    name: Test & Bench (Android ARM64 via QEMU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Install QEMU User Static
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+
+      - name: Cross-Compile Android ARM64 Binaries
+        run: |
+          zig build-exe spikes/resize_1cycle.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=resize_android
+          zig build-exe spikes/alt_architectures_bench.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=alt_android
+          zig build-exe spikes/perf_100x_prototype.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=perf_android
+          zig build-exe spikes/engine_m0.zig -target aarch64-linux-android -O ReleaseFast -femit-bin=engine_android
+          zig test spikes/paint_pipeline.zig -target aarch64-linux-android -O ReleaseFast --test-no-exec -femit-bin=test_paint_android
+          zig test spikes/resize_1cycle.zig -target aarch64-linux-android -O ReleaseFast --test-no-exec -femit-bin=test_resize_android
+
+      - name: Execute Android ARM64 via QEMU User Space
+        run: |
+          qemu-aarch64-static ./test_paint_android
+          qemu-aarch64-static ./test_resize_android
+          qemu-aarch64-static ./engine_android
+          qemu-aarch64-static ./resize_android
+          qemu-aarch64-static ./alt_android
+          qemu-aarch64-static ./perf_android
+
+  test-and-bench-freebsd:
+    name: Test & Bench (FreeBSD 14 VM via vmactions)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Cross-Compile FreeBSD x86_64 Binaries
+        run: |
+          zig build-exe spikes/resize_1cycle.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=resize_fbsd
+          zig build-exe spikes/alt_architectures_bench.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=alt_fbsd
+          zig build-exe spikes/perf_100x_prototype.zig -target x86_64-freebsd -O ReleaseFast -femit-bin=perf_fbsd
+          zig test spikes/paint_pipeline.zig -target x86_64-freebsd -O ReleaseFast --test-no-exec -femit-bin=test_paint_fbsd
+          zig test spikes/resize_1cycle.zig -target x86_64-freebsd -O ReleaseFast --test-no-exec -femit-bin=test_resize_fbsd
+
+      - name: Run Tests & Benchmarks in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          sync: rsync
+          run: |
+            chmod +x test_paint_fbsd test_resize_fbsd resize_fbsd alt_fbsd perf_fbsd
+            ./test_paint_fbsd
+            ./test_resize_fbsd
+            ./resize_fbsd
+            ./alt_fbsd
+            ./perf_fbsd
 
   required:
     name: Required Status Gate
@@ -175,8 +316,12 @@ jobs:
       - cross-compile-matrix
       - non-posix-fence
       - size-budget
-      - test-and-fuzz-linux
-      - test-and-fuzz-macos
+      - test-and-bench-linux
+      - test-and-bench-macos-ios
+      - test-and-bench-windows
+      - test-and-bench-wasm
+      - test-and-bench-android
+      - test-and-bench-freebsd
     runs-on: ubuntu-latest
     steps:
       - name: Evaluate Upstream Quality Gates

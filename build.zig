@@ -63,13 +63,25 @@ pub fn build(b: *std.Build) void {
     }
 
     // ------------------------------------------------------------------------
-    // Spikes Execution Runners
+    // Spikes Execution Runners & Benchmark Step
     // ------------------------------------------------------------------------
-    const spikes = [_]struct { name: []const u8, path: []const u8 }{
-        .{ .name = "engine_m0", .path = "spikes/engine_m0.zig" },
-        .{ .name = "resize_1cycle", .path = "spikes/resize_1cycle.zig" },
-        .{ .name = "truetype_real", .path = "spikes/truetype_real.zig" },
-        .{ .name = "paint_pipeline", .path = "spikes/paint_pipeline.zig" },
+    const bench_step = b.step("bench", "Run all flagship performance benchmarks");
+
+    const spikes = [_]struct { name: []const u8, path: []const u8, is_bench: bool }{
+        .{ .name = "engine_m0", .path = "spikes/engine_m0.zig", .is_bench = false },
+        .{ .name = "paint_pipeline", .path = "spikes/paint_pipeline.zig", .is_bench = false },
+        .{ .name = "resize_1cycle", .path = "spikes/resize_1cycle.zig", .is_bench = true },
+        .{ .name = "truetype_real", .path = "spikes/truetype_real.zig", .is_bench = true },
+        .{
+            .name = "perf_100x_prototype",
+            .path = "spikes/perf_100x_prototype.zig",
+            .is_bench = true,
+        },
+        .{
+            .name = "alt_architectures_bench",
+            .path = "spikes/alt_architectures_bench.zig",
+            .is_bench = true,
+        },
     };
 
     inline for (spikes) |s| {
@@ -85,5 +97,8 @@ pub fn build(b: *std.Build) void {
         run_cmd.addPassthruArgs();
         const run_step = b.step(b.fmt("run-{s}", .{s.name}), b.fmt("Run spike {s}", .{s.name}));
         run_step.dependOn(&run_cmd.step);
+        if (s.is_bench) {
+            bench_step.dependOn(&run_cmd.step);
+        }
     }
 }

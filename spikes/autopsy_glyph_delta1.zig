@@ -71,16 +71,7 @@ pub const AutopsyReport = struct {
 // ============================================================================
 
 fn loadFontFile(path: []const u8) !usize {
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
-    defer _ = std.posix.system.close(fd);
-
-    var total_read: usize = 0;
-    while (total_read < font_file_buffer.len) {
-        const n = try std.posix.read(fd, font_file_buffer[total_read..]);
-        if (n == 0) break;
-        total_read += n;
-    }
-    return total_read;
+    return ttf.loadFontToBuffer(path, &font_file_buffer);
 }
 
 // ============================================================================

@@ -51,7 +51,10 @@ const assert = std.debug.assert;
 // ============================================================================
 
 const is_windows = (builtin.os.tag == .windows);
-const is_posix = (builtin.os.tag != .windows and builtin.os.tag != .freestanding and builtin.os.tag != .wasi);
+const is_wasi = (builtin.os.tag == .wasi);
+const is_posix = (builtin.os.tag != .windows and
+    builtin.os.tag != .freestanding and
+    builtin.os.tag != .wasi);
 
 // Déclarations Win32 explicites sans runtime global
 const STD_OUTPUT_HANDLE: i32 = -11;
@@ -74,6 +77,13 @@ fn minimalPanic(message: []const u8, _: ?usize) noreturn {
         var written: u32 = 0;
         _ = WriteFile(handle, message.ptr, @intCast(message.len), &written, null);
         _ = WriteFile(handle, "\n", 1, &written, null);
+    } else if (is_wasi) {
+        const iov = [_]std.posix.iovec_const{
+            .{ .base = message.ptr, .len = message.len },
+            .{ .base = "\n", .len = 1 },
+        };
+        var written: usize = 0;
+        _ = std.os.wasi.fd_write(2, &iov, 2, &written);
     } else if (is_posix) {
         _ = std.posix.system.write(2, message.ptr, message.len);
         _ = std.posix.system.write(2, "\n", 1);
@@ -81,7 +91,10 @@ fn minimalPanic(message: []const u8, _: ?usize) noreturn {
     @trap();
 }
 pub const panic = std.debug.FullPanic(minimalPanic);
-pub const std_options_debug_threaded_io: ?*std.Io.Threaded = if (builtin.os.tag == .macos) null else std.Io.Threaded.global_single_threaded;
+pub const std_options_debug_threaded_io: ?*std.Io.Threaded = if (builtin.os.tag == .macos)
+    null
+else
+    std.Io.Threaded.global_single_threaded;
 pub const std_options: std.Options = .{
     .enable_segfault_handler = false,
     .signal_stack_size = null,
@@ -92,6 +105,10 @@ fn printStr(str: []const u8) void {
         const handle = GetStdHandle(STD_OUTPUT_HANDLE);
         var written: u32 = 0;
         _ = WriteFile(handle, str.ptr, @intCast(str.len), &written, null);
+    } else if (is_wasi) {
+        const iov = [_]std.posix.iovec_const{.{ .base = str.ptr, .len = str.len }};
+        var written: usize = 0;
+        _ = std.os.wasi.fd_write(1, &iov, 1, &written);
     } else if (is_posix) {
         _ = std.posix.system.write(1, str.ptr, str.len);
     }
@@ -111,6 +128,10 @@ fn readTimestampNs() u64 {
         _ = QueryPerformanceFrequency(&freq);
         if (freq == 0) return 0;
         return @intCast(@divFloor(@as(i128, count) * 1_000_000_000, freq));
+    } else if (is_wasi) {
+        var ts: std.os.wasi.timestamp_t = 0;
+        _ = std.os.wasi.clock_time_get(.MONOTONIC, 1, &ts);
+        return ts;
     } else if (is_posix) {
         var ts: std.posix.timespec = undefined;
         _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);

@@ -28,6 +28,7 @@ pub const is_posix = (builtin.target.os.tag != .windows and
     builtin.target.os.tag != .freestanding and
     builtin.target.os.tag != .wasi);
 pub const is_wasm = builtin.target.cpu.arch.isWasm();
+pub const is_wasi = (builtin.target.os.tag == .wasi);
 pub const is_freestanding = (builtin.target.os.tag == .freestanding);
 
 // ============================================================================
@@ -106,6 +107,11 @@ pub fn readMonotonicClockNs() u64 {
         if (qpc_ok == 0 or qpf_ok == 0) return 0;
         if (freq <= 0 or count <= 0) return 0;
         return @intCast(@divFloor(@as(i128, count) * 1_000_000_000, freq));
+    } else if (is_wasi) {
+        var ts: std.os.wasi.timestamp_t = 0;
+        const rc = std.os.wasi.clock_time_get(.MONOTONIC, 1, &ts);
+        if (rc != .SUCCESS) return 0;
+        return ts;
     } else if (is_posix) {
         var ts: std.posix.timespec = undefined;
         const rc = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
@@ -132,7 +138,7 @@ pub inline fn toCyclesAt4Ghz(ns: u64) u64 {
 // Direct Standard Output & Error (Zero Heap Allocation)
 // ============================================================================
 
-fn writeAllToStream(posix_fd: std.posix.fd_t, win_std_handle: i32, bytes: []const u8) void {
+fn writeAllToStream(posix_fd: i32, win_std_handle: i32, bytes: []const u8) void {
     if (bytes.len == 0) return;
     if (is_windows) {
         const handle = GetStdHandle(win_std_handle);
@@ -154,6 +160,19 @@ fn writeAllToStream(posix_fd: std.posix.fd_t, win_std_handle: i32, bytes: []cons
             if (ok == 0 or chunk_written == 0) break;
             written_total += chunk_written;
         }
+    } else if (is_wasi) {
+        var written_total: usize = 0;
+        const fd: std.os.wasi.fd_t = @intCast(posix_fd);
+        while (written_total < bytes.len) {
+            const iov = [_]std.posix.iovec_const{.{
+                .base = bytes[written_total..].ptr,
+                .len = bytes.len - written_total,
+            }};
+            var written: usize = 0;
+            const rc = std.os.wasi.fd_write(fd, &iov, 1, &written);
+            if (rc != .SUCCESS or written == 0) break;
+            written_total += written;
+        }
     } else if (is_posix) {
         var written_total: usize = 0;
         while (written_total < bytes.len) {
@@ -162,7 +181,11 @@ fn writeAllToStream(posix_fd: std.posix.fd_t, win_std_handle: i32, bytes: []cons
                 else => @as(usize, std.math.maxInt(i32)),
             };
             const chunk_len = @min(bytes.len - written_total, max_chunk);
-            const rc = std.posix.system.write(posix_fd, bytes[written_total..].ptr, chunk_len);
+            const rc = std.posix.system.write(
+                @intCast(posix_fd),
+                bytes[written_total..].ptr,
+                chunk_len,
+            );
             switch (std.posix.errno(rc)) {
                 .SUCCESS => {
                     const n: usize = @intCast(rc);
