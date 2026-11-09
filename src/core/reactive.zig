@@ -115,6 +115,32 @@ pub const Bitmask256 = struct {
         self.words = .{ 0, 0, 0, 0 };
     }
 
+    pub inline fn setAll(self: *Bitmask256) void {
+        self.words = .{ ~@as(u64, 0), ~@as(u64, 0), ~@as(u64, 0), ~@as(u64, 0) };
+    }
+
+    pub inline fn unionWith(self: Bitmask256, other: Bitmask256) Bitmask256 {
+        return .{
+            .words = .{
+                self.words[0] | other.words[0],
+                self.words[1] | other.words[1],
+                self.words[2] | other.words[2],
+                self.words[3] | other.words[3],
+            },
+        };
+    }
+
+    pub inline fn intersectWith(self: Bitmask256, other: Bitmask256) Bitmask256 {
+        return .{
+            .words = .{
+                self.words[0] & other.words[0],
+                self.words[1] & other.words[1],
+                self.words[2] & other.words[2],
+                self.words[3] & other.words[3],
+            },
+        };
+    }
+
     /// Pops the lowest active bit across words. Asserts that the bitmask is non-zero.
     pub inline fn popLowest(self: *Bitmask256) u8 {
         assert(!self.isZero());
@@ -129,10 +155,10 @@ pub const Bitmask256 = struct {
     }
 
     pub inline fn countSet(self: Bitmask256) usize {
-        return @popCount(self.words[0]) +
-            @popCount(self.words[1]) +
-            @popCount(self.words[2]) +
-            @popCount(self.words[3]);
+        return @as(usize, @popCount(self.words[0])) +
+            @as(usize, @popCount(self.words[1])) +
+            @as(usize, @popCount(self.words[2])) +
+            @as(usize, @popCount(self.words[3]));
     }
 };
 
@@ -164,7 +190,7 @@ pub fn CsrDependencyGraph(comptime field_count: usize, comptime total_edges: usi
         edges: [total_edges]DependencyEdge,
 
         pub inline fn getEdges(self: Self, field_idx: usize) []const DependencyEdge {
-            assert(field_idx < field_count);
+            if (field_idx >= field_count) return &.{};
             const start = self.offsets[field_idx];
             const end = self.offsets[field_idx + 1];
             assert(start <= end);
@@ -386,4 +412,45 @@ test "ReactiveDispatcher with CSR dependency graph" {
     try std.testing.expectEqual(@as(u16, 11), handler.events[1]);
     try std.testing.expectEqual(@as(u16, 30), handler.events[2]);
     try std.testing.expect(!dispatcher.isDirty());
+}
+
+test "Bitmask256 setAll, unionWith, and intersectWith" {
+    var b1 = Bitmask256.empty();
+    var b2 = Bitmask256.empty();
+
+    b1.set(10);
+    b1.set(100);
+    b2.set(100);
+    b2.set(200);
+
+    const u = b1.unionWith(b2);
+    try std.testing.expectEqual(@as(usize, 3), u.countSet());
+    try std.testing.expect(u.testBit(10));
+    try std.testing.expect(u.testBit(100));
+    try std.testing.expect(u.testBit(200));
+
+    const inter = b1.intersectWith(b2);
+    try std.testing.expectEqual(@as(usize, 1), inter.countSet());
+    try std.testing.expect(inter.testBit(100));
+
+    var b_all = Bitmask256.empty();
+    b_all.setAll();
+    try std.testing.expectEqual(@as(usize, 256), b_all.countSet());
+}
+
+test "CsrDependencyGraph safely handles unmonitored fields" {
+    const field_count = 2;
+    const total_edges = 1;
+    const Graph = CsrDependencyGraph(field_count, total_edges);
+    const graph = Graph{
+        .offsets = .{ 0, 1, 1 },
+        .edges = .{.{ .target_node_id = 99, .kind = .custom }},
+    };
+
+    // Field 0 has 1 edge
+    try std.testing.expectEqual(@as(usize, 1), graph.getEdges(0).len);
+    // Field 1 has 0 edges
+    try std.testing.expectEqual(@as(usize, 0), graph.getEdges(1).len);
+    // Field 5 (unmonitored) safely returns empty slice without panicking
+    try std.testing.expectEqual(@as(usize, 0), graph.getEdges(5).len);
 }

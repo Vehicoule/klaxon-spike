@@ -79,7 +79,9 @@ pub fn Engine(
         layout_dirty: bool = true,
 
         // GPU Subsystem
-        backend: GpuBackend = undefined,
+        gpu_device: GpuBackend.Device = undefined,
+        gpu_queue: GpuBackend.Queue = undefined,
+        color_target: hal.Texture = .null_handle,
         pipeline: hal.RenderPipeline = .null_handle,
         vertex_buffer: hal.Buffer = .null_handle,
 
@@ -118,25 +120,62 @@ pub fn Engine(
             // Clear node colors
             @memset(&self.node_colors, [4]u8{ 255, 255, 255, 255 });
 
-            // Initialize GPU mock / backend resources
-            GpuBackend.init(&self.backend);
+            // Initialize GPU Device and Queue through HAL contract
+            GpuBackend.Device.init(&self.gpu_device);
+            self.gpu_queue = GpuBackend.Queue.init(&self.gpu_device);
+
             self.vertex_buffer = GpuBackend.createBuffer(
-                &self.backend,
-                &.{
-                    .size_bytes = @intCast(@sizeOf([vertex_capacity]hal.Vertex2D)),
-                    .usage = .{ .vertex = true, .copy_dst = true },
+                &self.gpu_device,
+                .{
+                    .size = @intCast(@sizeOf([vertex_capacity]hal.Vertex2D)),
+                    .usage = hal.BufferUsage.vertex_dst,
                 },
-            );
+            ) catch hal.Buffer.null_handle;
             assert(self.vertex_buffer.isValid());
 
+            const vs = GpuBackend.createShaderModule(
+                &self.gpu_device,
+                .{ .code = "vertex_main" },
+            ) catch hal.ShaderModule.null_handle;
+            assert(vs.isValid());
+
             self.pipeline = GpuBackend.createRenderPipeline(
-                &self.backend,
-                &.{
-                    .vertex_shader = .{ .id = 1, .generation = 1 },
-                    .fragment_shader = .{ .id = 2, .generation = 1 },
+                &self.gpu_device,
+                .{
+                    .vertex_shader = vs,
+                    .color_target_format = .rgba8_unorm,
                 },
-            );
+            ) catch hal.RenderPipeline.null_handle;
             assert(self.pipeline.isValid());
+
+            const max_w: u32 = hal.mock.texture_width_max;
+            const max_h: u32 = hal.mock.texture_height_max;
+            const w_u32: u32 = @intFromFloat(viewport_w);
+            const h_u32: u32 = @intFromFloat(viewport_h);
+            const tex_w = @min(w_u32, max_w);
+            const tex_h = @min(h_u32, max_h);
+
+            self.color_target = GpuBackend.createTexture(
+                &self.gpu_device,
+                .{
+                    .size = .{ .width = @max(1, tex_w), .height = @max(1, tex_h) },
+                    .format = .rgba8_unorm,
+                    .usage = hal.TextureUsage.render_target,
+                },
+            ) catch hal.Texture.null_handle;
+            assert(self.color_target.isValid());
+        }
+
+        /// Releases GPU resources allocated for this engine instance.
+        pub fn deinit(self: *Self) void {
+            if (self.color_target.isValid()) {
+                GpuBackend.destroyTexture(&self.gpu_device, self.color_target);
+                self.color_target = .null_handle;
+            }
+            if (self.vertex_buffer.isValid()) {
+                GpuBackend.destroyBuffer(&self.gpu_device, self.vertex_buffer);
+                self.vertex_buffer = .null_handle;
+            }
         }
 
         /// Adds a UI node to the underlying flexbox tree with specified layout and color.
@@ -161,6 +200,8 @@ pub fn Engine(
             self.tree.run4Pass(self.viewport_width_px, self.viewport_height_px);
             self.tree.compileAffine();
             self.tree.partitionElastic();
+            const w_i16: i16 = @intFromFloat(self.viewport_width_px);
+            self.tree.solveResizeSimd(w_i16);
             self.layout_dirty = false;
         }
 
@@ -230,6 +271,25 @@ pub fn Engine(
             self.tree.solveResizeSimd(w_i16);
             self.layout_dirty = false;
 
+            if (self.color_target.isValid()) {
+                GpuBackend.destroyTexture(&self.gpu_device, self.color_target);
+            }
+            const max_w: u32 = hal.mock.texture_width_max;
+            const max_h: u32 = hal.mock.texture_height_max;
+            const w_u32: u32 = @intFromFloat(new_width_px);
+            const h_u32: u32 = @intFromFloat(new_height_px);
+            const tex_w = @min(w_u32, max_w);
+            const tex_h = @min(h_u32, max_h);
+
+            self.color_target = GpuBackend.createTexture(
+                &self.gpu_device,
+                .{
+                    .size = .{ .width = @max(1, tex_w), .height = @max(1, tex_h) },
+                    .format = .rgba8_unorm,
+                    .usage = hal.TextureUsage.render_target,
+                },
+            ) catch hal.Texture.null_handle;
+
             const t1 = time.now();
             self.metrics.layout_duration_ns = t1.durationSince(t0);
             self.metrics.layout_cycles = time.toCyclesAt4Ghz(self.metrics.layout_duration_ns);
@@ -283,7 +343,7 @@ pub fn Engine(
                 const upload_bytes: u32 = self.staged_vertex_count * @sizeOf(hal.Vertex2D);
                 const raw_bytes: [*]const u8 = @ptrCast(&self.vertex_staging);
                 GpuBackend.writeBuffer(
-                    &self.backend,
+                    &self.gpu_queue,
                     self.vertex_buffer,
                     0,
                     raw_bytes[0..upload_bytes],
@@ -291,24 +351,23 @@ pub fn Engine(
             }
 
             // 3. Record GPU render commands
-            var encoder = GpuBackend.createCommandEncoder(&self.backend);
-            {
-                var pass = encoder.beginRenderPass(.{
-                    .color_attachments = &.{.{
-                        .view = .{ .id = 1, .generation = 1 },
-                        .load_op = .clear,
-                        .store_op = .store,
-                        .clear_value = .{ .r = 0.05, .g = 0.05, .b = 0.05, .a = 1.0 },
-                    }},
-                });
-                pass.setPipeline(self.pipeline);
-                pass.setVertexBuffer(0, self.vertex_buffer, 0);
-                pass.draw(self.staged_vertex_count, 1, 0, 0);
-                pass.end();
-            }
+            var encoder = GpuBackend.createCommandEncoder(&self.gpu_device) catch return;
+            var pass = GpuBackend.beginRenderPass(&encoder, .{
+                .color_attachment = .{
+                    .target = self.color_target,
+                    .load_op = .clear,
+                    .store_op = .store,
+                    .clear_color = .{ 0.05, 0.05, 0.05, 1.0 },
+                },
+            }) catch return;
 
-            const cmd_buffer = encoder.finish();
-            GpuBackend.submit(&self.backend, &.{cmd_buffer});
+            GpuBackend.setPipeline(&pass, self.pipeline);
+            GpuBackend.setVertexBuffer(&pass, 0, self.vertex_buffer, 0);
+            GpuBackend.draw(&pass, self.staged_vertex_count, 1, 0, 0);
+            GpuBackend.endRenderPass(&pass);
+
+            const cmd_buffer = GpuBackend.finishCommandEncoder(&encoder) catch return;
+            GpuBackend.submit(&self.gpu_queue, &.{cmd_buffer});
 
             const t1 = time.now();
             self.metrics.render_duration_ns = t1.durationSince(t0);
@@ -446,4 +505,40 @@ test "Engine v2 sub-cycle window resize evaluation" {
         engine.metrics.layout_duration_ns * 4,
         engine.metrics.layout_cycles,
     );
+}
+
+test "Engine v2 resize updates renderFrame vertex staging" {
+    const TestState = extern struct {
+        scale: f32 = 1.0,
+    };
+
+    const EngineType = Engine(TestState, 8, hal.MockBackend);
+    var engine: EngineType = undefined;
+    engine.init(.{}, 800.0, 600.0);
+
+    const root = engine.addNode(.col, flexbox.INDEX_NONE, 0, .{
+        .pad_px = 0.0,
+        .gap_px = 0.0,
+    }, true, .{ 255, 255, 255, 255 });
+
+    _ = engine.addNode(.button, root, 1, .{
+        .grow = 1.0,
+        .height_px_min = 40.0,
+    }, true, .{ 255, 0, 0, 255 });
+
+    engine.buildLayout();
+    engine.renderFrame();
+
+    // Node 0 quads: indices 0..5. Node 1 quads: indices 6..11.
+    // In makeQuadVertices, vertex 1 is top-right: pos = .{ x + w, y }
+    try std.testing.expectEqual(@as(f32, 800.0), engine.tree.getRect(1).width_px);
+    try std.testing.expectEqual(@as(f32, 800.0), engine.vertex_staging[7].pos[0]);
+
+    // Resize viewport to 1400 px width
+    engine.resize(1400.0, 600.0);
+    engine.renderFrame();
+
+    // Verify renderFrame now stages quads reflecting 1400px width
+    try std.testing.expectEqual(@as(f32, 1400.0), engine.tree.getRect(1).width_px);
+    try std.testing.expectEqual(@as(f32, 1400.0), engine.vertex_staging[7].pos[0]);
 }

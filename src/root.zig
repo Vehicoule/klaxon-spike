@@ -26,5 +26,13 @@ pub const layout = struct {
 };
 
 test {
-    @import("std").testing.refAllDecls(@This());
+    const testing = @import("std").testing;
+    testing.refAllDecls(@This());
+    testing.refAllDecls(platform);
+    testing.refAllDecls(time);
+    testing.refAllDecls(gpu);
+    testing.refAllDecls(core.soa);
+    testing.refAllDecls(core.reactive);
+    testing.refAllDecls(core.engine);
+    testing.refAllDecls(layout.flexbox);
 }

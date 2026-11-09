@@ -136,7 +136,7 @@ pub fn SoAWithSimdLen(
 
         /// Returns a slice of the active elements for a given field name.
         pub inline fn slice(
-            self: anytype,
+            self: *const Self,
             comptime field_name: []const u8,
         ) []const field_types[fieldIndex(field_name)] {
             assert(self.len <= capacity);
@@ -145,7 +145,7 @@ pub fn SoAWithSimdLen(
 
         /// Returns a mutable slice of the active elements for a given field name.
         pub inline fn sliceMut(
-            self: anytype,
+            self: *Self,
             comptime field_name: []const u8,
         ) []field_types[fieldIndex(field_name)] {
             assert(self.len <= capacity);
@@ -154,9 +154,17 @@ pub fn SoAWithSimdLen(
 
         /// Returns a slice spanning up to `padded_capacity` for SIMD operations.
         pub inline fn paddedSlice(
-            self: anytype,
+            self: *Self,
             comptime field_name: []const u8,
         ) []field_types[fieldIndex(field_name)] {
+            return &@field(self.arrays, field_name);
+        }
+
+        /// Returns a const slice spanning up to `padded_capacity` for SIMD operations.
+        pub inline fn paddedSliceConst(
+            self: *const Self,
+            comptime field_name: []const u8,
+        ) []const field_types[fieldIndex(field_name)] {
             return &@field(self.arrays, field_name);
         }
 
@@ -284,4 +292,24 @@ test "SoA SIMD vector load and store" {
     try std.testing.expectEqual(input_v[1], read_v[1]);
     try std.testing.expectEqual(input_v[2], read_v[2]);
     try std.testing.expectEqual(input_v[3], read_v[3]);
+}
+
+test "SoA slice and sliceMut access" {
+    var particles: SoA(TestParticle, 16) = undefined;
+    particles.init();
+
+    particles.append(.{ .x = 10.0, .y = 20.0, .vx = 0.0, .vy = 0.0, .id = 1 });
+    particles.append(.{ .x = 30.0, .y = 40.0, .vx = 0.0, .vy = 0.0, .id = 2 });
+
+    const x_slice = particles.slice("x");
+    try std.testing.expectEqual(@as(usize, 2), x_slice.len);
+    try std.testing.expectEqual(@as(f32, 10.0), x_slice[0]);
+    try std.testing.expectEqual(@as(f32, 30.0), x_slice[1]);
+
+    const y_mut = particles.sliceMut("y");
+    y_mut[1] = 99.0;
+    try std.testing.expectEqual(@as(f32, 99.0), particles.get(1).y);
+
+    const pad_slice = particles.paddedSlice("id");
+    try std.testing.expectEqual(@as(usize, 32), pad_slice.len);
 }

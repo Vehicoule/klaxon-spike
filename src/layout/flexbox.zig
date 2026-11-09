@@ -267,10 +267,24 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                         0.0;
                     const rem = @max(0.0, inner_w - sum_min - gaps);
 
+                    var rem_space = rem;
+                    var rem_grow = sum_grow;
+
                     cursor = first_child;
                     while (cursor < subtree_end) {
                         const grow = self.nodes[cursor].style.grow;
-                        const extra = if (sum_grow > 0.0) rem * (grow / sum_grow) else 0.0;
+                        var extra: f32 = 0.0;
+                        if (rem_grow > 0.0 and grow > 0.0) {
+                            if (grow >= rem_grow) {
+                                extra = rem_space;
+                                rem_space = 0.0;
+                                rem_grow = 0.0;
+                            } else {
+                                extra = rem_space * (grow / rem_grow);
+                                rem_space -= extra;
+                                rem_grow -= grow;
+                            }
+                        }
                         self.width[cursor] = self.nodes[cursor].style.width_px_min + extra;
                         cursor += self.nodes[cursor].subtree_count;
                     }
@@ -419,17 +433,35 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                     var cur_al = inner_al;
                     var cur_bl = inner_bl;
 
+                    var rem_grow = sum_grow;
+                    var rem_a = a_rem;
+                    var rem_b = b_rem;
+
                     cursor = first_child;
                     while (cursor < subtree_end) {
                         const grow = self.nodes[cursor].style.grow;
                         self.alpha_l[cursor] = cur_al;
                         self.beta_l[cursor] = cur_bl;
 
-                        if (sum_grow > 0.0 and grow > 0.0) {
-                            const ratio = grow / sum_grow;
-                            self.alpha_r[cursor] = cur_al + a_rem * ratio;
-                            self.beta_r[cursor] = cur_bl +
-                                self.nodes[cursor].style.width_px_min + b_rem * ratio;
+                        if (rem_grow > 0.0 and grow > 0.0) {
+                            var aw: f32 = undefined;
+                            var bw: f32 = undefined;
+                            if (grow >= rem_grow) {
+                                aw = rem_a;
+                                bw = self.nodes[cursor].style.width_px_min + rem_b;
+                                rem_grow = 0.0;
+                                rem_a = 0.0;
+                                rem_b = 0.0;
+                            } else {
+                                const ratio = grow / rem_grow;
+                                aw = rem_a * ratio;
+                                bw = self.nodes[cursor].style.width_px_min + rem_b * ratio;
+                                rem_grow -= grow;
+                                rem_a -= aw;
+                                rem_b -= bw;
+                            }
+                            self.alpha_r[cursor] = cur_al + aw;
+                            self.beta_r[cursor] = cur_bl + bw;
                         } else {
                             self.alpha_r[cursor] = cur_al;
                             self.beta_r[cursor] = cur_bl + self.nodes[cursor].style.width_px_min;
@@ -446,8 +478,10 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
             // Quantize into Q14 fixed-point representation (scale = 16384)
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                assert(self.alpha_l[i] >= -1.9999 and self.alpha_l[i] <= 1.9999);
-                assert(self.alpha_r[i] >= -1.9999 and self.alpha_r[i] <= 1.9999);
+                assert(self.alpha_l[i] >= -1.9999);
+                assert(self.alpha_l[i] <= 1.9999);
+                assert(self.alpha_r[i] >= -1.9999);
+                assert(self.alpha_r[i] <= 1.9999);
                 self.alpha_l_q14[i] = @intFromFloat(@round(self.alpha_l[i] * SCALE_Q14));
                 self.beta_l_i16[i] = @intFromFloat(@round(self.beta_l[i]));
                 self.alpha_r_q14[i] = @intFromFloat(@round(self.alpha_r[i] * SCALE_Q14));
@@ -482,6 +516,13 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 } else {
                     self.rigid_indices[self.rigid_count] = @intCast(i);
                     self.rigid_count += 1;
+                    // Initialize rigid node coordinates (invariant to viewport width)
+                    const x = self.beta_l_i16[i];
+                    const w = self.beta_r_i16[i] - self.beta_l_i16[i];
+                    self.resolved_x[i] = x;
+                    self.resolved_w[i] = w;
+                    self.rects[i].x_px = @floatFromInt(x);
+                    self.rects[i].width_px = @floatFromInt(w);
                 }
             }
 
@@ -509,8 +550,12 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 const x = (al * w_32 + (bl << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
                 const r = (ar * w_32 + (br << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
 
-                self.resolved_x[i] = @intCast(x);
-                self.resolved_w[i] = @intCast(r - x);
+                const x_16: i16 = @intCast(x);
+                const w_16: i16 = @intCast(r - x);
+                self.resolved_x[i] = x_16;
+                self.resolved_w[i] = w_16;
+                self.rects[i].x_px = @floatFromInt(x_16);
+                self.rects[i].width_px = @floatFromInt(w_16);
             }
         }
 
@@ -540,6 +585,13 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 self.resolved_x[i..][0..simd_lane_i16].* = x_16;
                 self.resolved_w[i..][0..simd_lane_i16].* = w_16;
             }
+
+            const count = self.node_count;
+            var j: usize = 0;
+            while (j < count) : (j += 1) {
+                self.rects[j].x_px = @floatFromInt(self.resolved_x[j]);
+                self.rects[j].width_px = @floatFromInt(self.resolved_w[j]);
+            }
         }
 
         /// Ultra-fast evaluation of partitioned elastic nodes only (< 1 cycle / node).
@@ -558,8 +610,12 @@ pub fn FlexboxTree(comptime capacity_max: usize) type {
                 const x = (al * w_32 + (bl << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
                 const r = (ar * w_32 + (br << SHIFT_Q14) + BIAS_Q14) >> SHIFT_Q14;
 
-                self.resolved_x[i] = @intCast(x);
-                self.resolved_w[i] = @intCast(r - x);
+                const x_16: i16 = @intCast(x);
+                const w_16: i16 = @intCast(r - x);
+                self.resolved_x[i] = x_16;
+                self.resolved_w[i] = w_16;
+                self.rects[i].x_px = @floatFromInt(x_16);
+                self.rects[i].width_px = @floatFromInt(w_16);
             }
         }
 
@@ -723,5 +779,95 @@ test "SIMD Q14 evaluation is bit-exact with scalar Q14" {
     for (0..6) |i| {
         try std.testing.expectEqual(scalar_x[i], tree.resolved_x[i]);
         try std.testing.expectEqual(scalar_w[i], tree.resolved_w[i]);
+    }
+}
+
+test "Elastic partitioning initializes rigid nodes correctly with solveElasticOnly" {
+    var tree: FlexboxTree(8) = undefined;
+    tree.init();
+
+    const root = tree.addNode(.row, INDEX_NONE, 0, .{
+        .pad_px = 0.0,
+        .gap_px = 4.0,
+    }, true);
+
+    // Node 1: Rigid button (fixed min width 120, grow = 0) at fixed position
+    _ = tree.addNode(.button, root, 1, .{
+        .grow = 0.0,
+        .width_px_min = 120.0,
+    }, false);
+    // Node 2: Elastic button (grow = 1.0)
+    _ = tree.addNode(.button, root, 1, .{ .grow = 1.0 }, true);
+
+    tree.computeSubtreeCounts();
+    tree.compileAffine();
+    tree.partitionElastic();
+
+    try std.testing.expectEqual(@as(u16, 2), tree.elastic_count); // root and button 2
+    try std.testing.expectEqual(@as(u16, 1), tree.rigid_count); // button 1
+
+    // solveElasticOnly evaluates only elastic nodes; rigid nodes were set during partition
+    tree.solveResizeQ14(1000);
+    const box_rigid_scalar = tree.getResolvedBoxI16(1);
+    const box_elastic_scalar = tree.getResolvedBoxI16(2);
+
+    // Now re-run with solveElasticOnly
+    tree.resolved_x[2] = 0;
+    tree.resolved_w[2] = 0;
+    tree.solveElasticOnly(1000);
+
+    const box_rigid = tree.getResolvedBoxI16(1);
+    const box_elastic = tree.getResolvedBoxI16(2);
+
+    // Rigid button width must be 120 at x=0
+    try std.testing.expectEqual(box_rigid_scalar.x_px, box_rigid.x_px);
+    try std.testing.expectEqual(box_rigid_scalar.width_px, box_rigid.width_px);
+    try std.testing.expectEqual(@as(i16, 0), box_rigid.x_px);
+    try std.testing.expectEqual(@as(i16, 120), box_rigid.width_px);
+
+    // Elastic button matches scalar solution
+    try std.testing.expectEqual(box_elastic_scalar.x_px, box_elastic.x_px);
+    try std.testing.expectEqual(box_elastic_scalar.width_px, box_elastic.width_px);
+    try std.testing.expectEqual(@as(i16, 124), box_elastic.x_px);
+    try std.testing.expectEqual(@as(i16, 876), box_elastic.width_px);
+}
+
+test "Arbitrary fractional grow ratios 1:3:7:11 have exact zero hairline gap" {
+    var tree: FlexboxTree(8) = undefined;
+    tree.init();
+
+    const root = tree.addNode(.row, INDEX_NONE, 0, .{
+        .pad_px = 0.0,
+        .gap_px = 1.0,
+    }, true);
+
+    _ = tree.addNode(.button, root, 1, .{ .grow = 1.0 }, true);
+    _ = tree.addNode(.button, root, 1, .{ .grow = 3.0 }, true);
+    _ = tree.addNode(.button, root, 1, .{ .grow = 7.0 }, true);
+    _ = tree.addNode(.button, root, 1, .{ .grow = 11.0 }, true);
+
+    tree.computeSubtreeCounts();
+    tree.compileAffine();
+
+    const widths = [_]i16{ 768, 1024, 1366, 1440, 1920, 2560, 3840 };
+    for (widths) |w| {
+        tree.solveResizeQ14(w);
+
+        const x1 = tree.resolved_x[1];
+        const w1 = tree.resolved_w[1];
+        const x2 = tree.resolved_x[2];
+        const w2 = tree.resolved_w[2];
+        const x3 = tree.resolved_x[3];
+        const w3 = tree.resolved_w[3];
+        const x4 = tree.resolved_x[4];
+        const w4 = tree.resolved_w[4];
+
+        // Zero-gap invariant between each sibling: x_{i+1} == x_i + w_i + gap
+        try std.testing.expectEqual(x2, x1 + w1 + 1);
+        try std.testing.expectEqual(x3, x2 + w2 + 1);
+        try std.testing.expectEqual(x4, x3 + w3 + 1);
+
+        // Entire width is filled without residual error
+        try std.testing.expectEqual(@as(i16, w), x4 + w4);
     }
 }
