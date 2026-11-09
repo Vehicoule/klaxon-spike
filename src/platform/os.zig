@@ -315,6 +315,17 @@ pub fn getFileSize(handle: FileHandle) FileError!u64 {
         const ok = GetFileSizeEx(handle.handle, &size);
         if (ok == 0 or size < 0) return FileError.Unexpected;
         return @intCast(size);
+    } else if (is_linux) {
+        var statx = std.mem.zeroes(std.os.linux.Statx);
+        const rc = std.os.linux.statx(
+            handle.handle,
+            "",
+            std.os.linux.AT.EMPTY_PATH,
+            .{ .SIZE = true },
+            &statx,
+        );
+        if (std.posix.errno(rc) != .SUCCESS or !statx.mask.SIZE) return FileError.Unexpected;
+        return statx.size;
     } else if (is_posix) {
         var stat: std.posix.Stat = undefined;
         const rc = std.posix.system.fstat(handle.handle, &stat);
